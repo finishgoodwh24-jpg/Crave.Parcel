@@ -865,9 +865,13 @@
             
             <!-- Admin Top Bar -->
             <div class="bg-brand-primary text-white px-6 py-4 flex flex-wrap items-center justify-between gap-4">
-                <div class="flex items-center gap-3">
+                <div class="flex flex-wrap items-center gap-3">
                     <span class="px-2.5 py-1 rounded-md bg-brand-accent text-emerald-950 text-[10px] font-extrabold uppercase">Owner Control Center</span>
                     <h2 class="font-serif text-xl sm:text-2xl font-bold">Crave Parcel — Full Edit Dashboard</h2>
+                    <span id="cloud-sync-badge" class="px-2.5 py-1 rounded-full bg-white/10 text-cream-200 text-[11px] font-medium flex items-center gap-1.5">
+                        <i class="fa-solid fa-cloud text-brand-accent"></i>
+                        <span>Mode Lokal</span>
+                    </span>
                 </div>
                 <div class="flex items-center gap-2.5">
                     <button onclick="resetAllToDefault()" class="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-xs font-semibold">Reset Default</button>
@@ -1530,8 +1534,21 @@
         // Utility: Format Rupiah
         const formatRp = (num) => 'Rp ' + Number(num || 0).toLocaleString('id-ID');
 
-        // Persist State
-        function persistState() {
+        // Persist State + Automatic Cloud Sync Trigger
+        let autoSyncTimer = null;
+        function updateCloudSyncBadge(statusType, text) {
+            const badge = document.getElementById('cloud-sync-badge');
+            if (!badge) return;
+            const iconMap = {
+                idle: '<i class="fa-solid fa-cloud text-brand-accent"></i>',
+                syncing: '<i class="fa-solid fa-arrows-rotate fa-spin text-amber-300"></i>',
+                synced: '<i class="fa-solid fa-cloud-check text-emerald-300"></i>',
+                error: '<i class="fa-solid fa-triangle-exclamation text-rose-300"></i>'
+            };
+            badge.innerHTML = `${iconMap[statusType] || iconMap.idle}<span>${text}</span>`;
+        }
+
+        function persistState(triggerCloudSync = false) {
             localStorage.setItem('cp_products', JSON.stringify(state.products));
             localStorage.setItem('cp_builder_boxes', JSON.stringify(state.builderBoxes));
             localStorage.setItem('cp_builder_items', JSON.stringify(state.builderItems));
@@ -1540,6 +1557,14 @@
             localStorage.setItem('cp_cart', JSON.stringify(state.cart));
             localStorage.setItem('cp_orders', JSON.stringify(state.orders));
             localStorage.setItem('cp_settings', JSON.stringify(state.settings));
+
+            if (triggerCloudSync && state.settings.gasUrl) {
+                updateCloudSyncBadge('syncing', 'Menyinkronkan otomatis...');
+                clearTimeout(autoSyncTimer);
+                autoSyncTimer = setTimeout(() => {
+                    pushAllToGoogleSheets(false);
+                }, 1200);
+            }
         }
 
         // Toast Helper
@@ -1573,9 +1598,15 @@
             if (chkDate) chkDate.min = tomorrow;
             if (b2bDate) b2bDate.min = tomorrow;
 
-            // Auto-pull latest data if Google Apps Script URL is configured
+            // Auto-pull latest data if Google Apps Script URL is configured & auto-refresh every 60s
             if (state.settings.gasUrl) {
+                updateCloudSyncBadge('syncing', 'Memuat data cloud...');
                 pullAllFromGoogleSheets(false);
+                setInterval(() => {
+                    if (document.visibilityState === 'visible' && !autoSyncTimer) {
+                        pullAllFromGoogleSheets(false);
+                    }
+                }, 60000);
             }
         });
 
@@ -1594,21 +1625,28 @@
             document.getElementById('footer-wa-display').textContent = `WhatsApp: +${s.waNumber}`;
             document.getElementById('event-banner-text').textContent = s.bannerText;
 
-            // Apply Hero Content
-            document.getElementById('hero-badge-display').textContent = s.heroBadge;
-            document.getElementById('hero-title-display').innerHTML = s.heroTitle;
-            document.getElementById('hero-subtitle-display').textContent = s.heroSubtitle;
-            document.getElementById('hero-cta1-display').textContent = s.heroCta1;
-            document.getElementById('hero-cta2-display').textContent = s.heroCta2;
-            document.getElementById('hero-rating-display').innerHTML = s.heroRating;
-            document.getElementById('hero-card-title-display').textContent = s.heroCardTitle;
-            document.getElementById('hero-card-sub-display').textContent = s.heroCardSub;
-
+            // Hero Dynamic Texts & Image
+            const heroBadge = document.getElementById('hero-badge-display');
+            if (heroBadge) heroBadge.textContent = s.heroBadge;
+            const heroTitle = document.getElementById('hero-title-display');
+            if (heroTitle) heroTitle.innerHTML = s.heroTitle;
+            const heroSub = document.getElementById('hero-subtitle-display');
+            if (heroSub) heroSub.textContent = s.heroSubtitle;
+            const heroCta1 = document.getElementById('hero-cta1-display');
+            if (heroCta1) heroCta1.textContent = s.heroCta1;
+            const heroCta2 = document.getElementById('hero-cta2-display');
+            if (heroCta2) heroCta2.textContent = s.heroCta2;
+            const heroRating = document.getElementById('hero-rating-display');
+            if (heroRating) heroRating.textContent = s.heroRating;
+            const heroCardTitle = document.getElementById('hero-card-title-display');
+            if (heroCardTitle) heroCardTitle.textContent = s.heroCardTitle;
+            const heroCardSub = document.getElementById('hero-card-sub-display');
+            if (heroCardSub) heroCardSub.textContent = s.heroCardSub;
             if (s.heroImage) {
                 document.getElementById('hero-showcase-img').src = s.heroImage;
             }
 
-            // Apply Logo HD
+            // Custom Logo HD
             const logoImg = document.getElementById('brand-logo-img');
             const logoIcon = document.getElementById('brand-logo-icon');
             if (s.logoDataUrl) {
@@ -1620,11 +1658,10 @@
                 logoIcon.classList.remove('hidden');
             }
 
-            // Apply Event Theme Class
-            document.body.classList.remove('theme-lebaran', 'theme-natal', 'theme-imlek');
-            if (EVENT_THEMES[s.theme] && EVENT_THEMES[s.theme].className) {
-                document.body.classList.add(EVENT_THEMES[s.theme].className);
-            }
+            // Event Theme Class
+            document.body.className = 'bg-brand-surface text-stone-800 font-sans antialiased selection:bg-brand-accent selection:text-white';
+            const themeObj = EVENT_THEMES[s.theme] || EVENT_THEMES.default;
+            if (themeObj.className) document.body.classList.add(themeObj.className);
         }
 
         function renderTrustSignals() {
@@ -1652,27 +1689,27 @@
                         <div class="flex text-gold-500 text-xs gap-1">
                             <i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i>
                         </div>
-                        <p class="text-sm text-stone-700 italic leading-relaxed">"${t.quote}"</p>
+                        <p class="text-sm text-stone-700 leading-relaxed italic">"${t.quote}"</p>
                     </div>
-                    <div class="pt-3 border-t border-cream-200 flex items-center justify-between gap-2">
+                    <div class="flex items-center justify-between pt-3 border-t border-cream-200">
                         <div>
                             <p class="font-bold text-sm text-brand-primary">${t.name}</p>
-                            <p class="text-xs text-stone-500">${t.role}</p>
+                            <p class="text-[11px] text-stone-500">${t.role}</p>
                         </div>
-                        <span class="px-2.5 py-1 rounded-full ${t.tag === 'Corporate' ? 'bg-brand-primary/10 text-brand-primary' : 'bg-emerald-100 text-emerald-800'} text-[10px] font-bold shrink-0">${t.tag}</span>
+                        <span class="px-2.5 py-1 rounded-full bg-brand-primary/10 text-brand-primary text-[10px] font-bold uppercase">${t.tag}</span>
                     </div>
                 </div>
             `).join('');
         }
 
         /**
-         * 3. INTERACTIVE DIGITAL CATALOG LOGIC
+         * 3. INTERACTIVE CATALOG & FILTERING
          */
-        function setCategoryFilter(cat) {
-            state.activeCategory = cat;
+        function setCategoryFilter(category) {
+            state.activeCategory = category;
             document.querySelectorAll('.cat-btn').forEach(btn => {
-                if (btn.dataset.cat === cat) {
-                    btn.className = 'cat-btn active shrink-0 px-4 py-2 rounded-full text-xs sm:text-sm font-semibold transition-all bg-brand-primary text-white shadow-xs';
+                if (btn.dataset.cat === category) {
+                    btn.className = 'cat-btn active shrink-0 px-4 py-2 rounded-full text-xs sm:text-sm font-semibold transition-all bg-brand-primary text-white';
                 } else {
                     btn.className = 'cat-btn shrink-0 px-4 py-2 rounded-full text-xs sm:text-sm font-semibold transition-all bg-cream-100 text-stone-700 hover:bg-cream-200';
                 }
@@ -2446,6 +2483,7 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             renderAdminContentEditors();
             renderAdminOrders();
             loadAdminSettingsFields();
+            updateCloudSyncBadge(state.settings.gasUrl ? 'synced' : 'idle', state.settings.gasUrl ? 'Cloud Auto-Sync Aktif' : 'Mode Lokal (Belum Connect Sheets)');
             document.getElementById('admin-dashboard-modal').classList.remove('hidden');
         }
 
@@ -2551,11 +2589,11 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
                 });
             }
 
-            persistState();
+            persistState(true);
             renderCatalog();
             renderAdminProductsTable();
             resetAdminProductForm();
-            showToast('Katalog produk & pengaturan frame berhasil disimpan!');
+            showToast('Katalog produk & pengaturan frame berhasil disimpan & disinkronkan!');
         }
 
         function editAdminProduct(id) {
@@ -2578,10 +2616,10 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
 
         function deleteAdminProduct(id) {
             state.products = state.products.filter(p => p.id !== id);
-            persistState();
+            persistState(true);
             renderCatalog();
             renderAdminProductsTable();
-            showToast('Produk dihapus dari katalog.');
+            showToast('Produk dihapus & disinkronkan ke cloud.');
         }
 
         function resetAdminProductForm() {
@@ -2659,11 +2697,11 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             } else {
                 state.builderBoxes.push({ id: 'box-' + Date.now(), name, price, capacity, desc });
             }
-            persistState();
+            persistState(true);
             renderBuilder();
             renderAdminBuilderManagers();
             resetBuilderBoxForm();
-            showToast('Pilihan wadah builder disimpan!');
+            showToast('Pilihan wadah builder disimpan & disinkronkan!');
         }
 
         function editBuilderBox(id) {
@@ -2683,10 +2721,10 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             }
             state.builderBoxes = state.builderBoxes.filter(b => b.id !== id);
             if (state.builder.selectedBoxId === id) state.builder.selectedBoxId = state.builderBoxes[0].id;
-            persistState();
+            persistState(true);
             renderBuilder();
             renderAdminBuilderManagers();
-            showToast('Wadah builder dihapus.');
+            showToast('Wadah builder dihapus & disinkronkan.');
         }
 
         function resetBuilderBoxForm() {
@@ -2711,11 +2749,11 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             } else {
                 state.builderItems.push({ id: 'bi-' + Date.now(), name, price, category, icon });
             }
-            persistState();
+            persistState(true);
             renderBuilder();
             renderAdminBuilderManagers();
             resetBuilderItemForm();
-            showToast('Item isian builder disimpan!');
+            showToast('Item isian builder disimpan & disinkronkan!');
         }
 
         function editBuilderItem(id) {
@@ -2731,10 +2769,10 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
         function deleteBuilderItem(id) {
             state.builderItems = state.builderItems.filter(i => i.id !== id);
             delete state.builder.selectedItems[id];
-            persistState();
+            persistState(true);
             renderBuilder();
             renderAdminBuilderManagers();
-            showToast('Item isian builder dihapus.');
+            showToast('Item isian builder dihapus & disinkronkan.');
         }
 
         function resetBuilderItemForm() {
@@ -2742,6 +2780,7 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             document.getElementById('adm-bitem-name').value = '';
             document.getElementById('adm-bitem-price').value = '';
             document.getElementById('adm-bitem-cat').value = '';
+            document.getElementById('adm-bitem-icon').value = 'fa-cookie-bite';
         }
 
         // TAB 3: Hero, Trust Signals & Testimonials Editors
@@ -2800,9 +2839,9 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             state.settings.heroCta2 = document.getElementById('adm-hero-cta2').value.trim();
             state.settings.heroCardTitle = document.getElementById('adm-hero-card-title').value.trim();
             state.settings.heroCardSub = document.getElementById('adm-hero-card-sub').value.trim();
-            persistState();
+            persistState(true);
             applySavedSettingsToUI();
-            showToast('Konten & foto Hero Section berhasil diperbarui!');
+            showToast('Konten & foto Hero Section berhasil diperbarui & disinkronkan!');
         }
 
         function resetHeroImage() {
@@ -2810,7 +2849,7 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             state.settings.heroImage = defaultHero;
             document.getElementById('adm-hero-img-preview').src = defaultHero;
             document.getElementById('adm-hero-img-url').value = '';
-            persistState();
+            persistState(true);
             applySavedSettingsToUI();
             showToast('Foto Hero dikembalikan ke default.');
         }
@@ -2821,9 +2860,9 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
                 title: document.getElementById(`adm-trust-title-${idx}`).value.trim(),
                 desc: document.getElementById(`adm-trust-desc-${idx}`).value.trim()
             }));
-            persistState();
+            persistState(true);
             renderTrustSignals();
-            showToast('4 Pilar Keunggulan berhasil diperbarui!');
+            showToast('4 Pilar Keunggulan berhasil diperbarui & disinkronkan!');
         }
 
         function saveTestimonial(e) {
@@ -2840,11 +2879,11 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             } else {
                 state.testimonials.unshift({ id: 't-' + Date.now(), name, role, tag, quote });
             }
-            persistState();
+            persistState(true);
             renderTestimonials();
             renderAdminContentEditors();
             resetTestimonialForm();
-            showToast('Testimoni klien disimpan!');
+            showToast('Testimoni klien disimpan & disinkronkan!');
         }
 
         function editTestimonial(id) {
@@ -2859,10 +2898,10 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
 
         function deleteTestimonial(id) {
             state.testimonials = state.testimonials.filter(t => t.id !== id);
-            persistState();
+            persistState(true);
             renderTestimonials();
             renderAdminContentEditors();
-            showToast('Testimoni dihapus.');
+            showToast('Testimoni dihapus & disinkronkan.');
         }
 
         function resetTestimonialForm() {
@@ -2879,16 +2918,16 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
                 state.settings.bannerText = EVENT_THEMES[themeKey].banner;
                 document.getElementById('adm-banner-text').value = state.settings.bannerText;
             }
-            persistState();
+            persistState(true);
             applySavedSettingsToUI();
-            showToast(`Tema event "${themeKey.toUpperCase()}" berhasil diaktifkan!`);
+            showToast(`Tema event "${themeKey.toUpperCase()}" diaktifkan & disinkronkan!`);
         }
 
         function saveBannerText() {
             state.settings.bannerText = document.getElementById('adm-banner-text').value.trim();
-            persistState();
+            persistState(true);
             applySavedSettingsToUI();
-            showToast('Teks pengumuman diperbarui!');
+            showToast('Teks pengumuman diperbarui & disinkronkan!');
         }
 
         async function handleLogoUpload(event) {
@@ -2896,14 +2935,14 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             if (!file) return;
             const hdLogo = await compressImageToHD(file, 400, 0.92);
             state.settings.logoDataUrl = hdLogo;
-            persistState();
+            persistState(true);
             applySavedSettingsToUI();
             showToast('Logo HD berhasil diperbarui!');
         }
 
         function removeCustomLogo() {
             state.settings.logoDataUrl = '';
-            persistState();
+            persistState(true);
             applySavedSettingsToUI();
             showToast('Logo kembali ke ikon default.');
         }
@@ -2912,9 +2951,9 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             const name = document.getElementById('adm-brand-name').value.trim();
             if (name) {
                 state.settings.brandName = name;
-                persistState();
+                persistState(true);
                 applySavedSettingsToUI();
-                showToast('Identitas brand disimpan!');
+                showToast('Identitas brand disimpan & disinkronkan!');
             }
         }
 
@@ -2925,7 +2964,7 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             state.settings.heroImage = hdHero;
             const prevEl = document.getElementById('adm-hero-img-preview');
             if (prevEl) prevEl.src = hdHero;
-            persistState();
+            persistState(true);
             applySavedSettingsToUI();
             showToast('Foto utama Hero HD berhasil diperbarui!');
         }
@@ -3101,15 +3140,16 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             }
         }
 
-        async function pushAllToGoogleSheets() {
+        async function pushAllToGoogleSheets(notify = true) {
             const url = document.getElementById('adm-set-gas-url').value.trim() || state.settings.gasUrl;
             if (!url) {
-                showToast('Masukkan URL Web App Google Apps Script terlebih dahulu.');
+                if (notify) showToast('Masukkan URL Web App Google Apps Script terlebih dahulu.');
                 return;
             }
             state.settings.gasUrl = url;
-            persistState();
-            showToast('Menyinkronkan data ke Google Sheets...');
+            persistState(false);
+            updateCloudSyncBadge('syncing', 'Menyinkronkan...');
+            if (notify) showToast('Menyinkronkan data ke Google Sheets...');
 
             try {
                 await fetch(url, {
@@ -3129,9 +3169,14 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
                         }
                     })
                 });
-                showToast('Data berhasil dikirim ke Google Sheets!');
+                autoSyncTimer = null;
+                const timeStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+                updateCloudSyncBadge('synced', `Tersinkron Otomatis (${timeStr})`);
+                if (notify) showToast('Data berhasil dikirim ke Google Sheets!');
             } catch (err) {
-                showToast('Gagal terhubung ke Google Sheets. Periksa URL Web App Anda.');
+                autoSyncTimer = null;
+                updateCloudSyncBadge('error', 'Gagal Sinkron Cloud');
+                if (notify) showToast('Gagal terhubung ke Google Sheets. Periksa URL Web App Anda.');
             }
         }
 
@@ -3168,12 +3213,14 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
                             };
                         }
                     }
-                    persistState();
+                    persistState(false);
                     applySavedSettingsToUI();
                     renderTrustSignals();
                     renderTestimonials();
                     renderCatalog();
                     renderBuilder();
+                    const timeStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+                    updateCloudSyncBadge('synced', `Cloud Aktif (${timeStr})`);
                     if (document.getElementById('admin-dashboard-modal') && !document.getElementById('admin-dashboard-modal').classList.contains('hidden')) {
                         renderAdminProductsTable();
                         renderAdminBuilderManagers();
@@ -3184,6 +3231,7 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
                     if (notify) showToast('Data terbaru berhasil ditarik dari Google Sheets!');
                 }
             } catch (err) {
+                updateCloudSyncBadge('error', 'Koneksi Sheets Terputus');
                 if (notify) showToast('Gagal menarik data dari Google Sheets.');
             }
         }
