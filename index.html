@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title id="meta-title">Crave Parcel — Jual Hampers Lebaran, Natal, Imlek & Parcel Perusahaan Eksklusif</title>
-    <link rel="icon" type="image/jpeg" href="https://i.ibb.co.com/JwhjzbCz/Whats-App-Image-2026-11-11-at-11-07-24.jpg">
     <meta id="meta-desc" name="description" content="Pusat pembuatan custom hampers premium dan parcel perusahaan (Corporate Gift). Pengiriman aman ke seluruh kota, gratis kartu ucapan custom, dan kemasan mewah.">
     <meta name="keywords" content="Jual Hampers Lebaran, Parcel Perusahaan, Custom Hampers, Hampers Natal, Hampers Imlek, Corporate Gift Indonesia, Crave Parcel">
     <meta name="robots" content="index, follow">
@@ -874,6 +873,9 @@
                     </span>
                 </div>
                 <div class="flex items-center gap-2.5">
+                    <button onclick="CraveCloudSyncEngine.forceSyncNow()" class="px-3 py-1.5 rounded-lg bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-200 text-xs font-semibold flex items-center gap-1.5">
+                        <i class="fa-solid fa-arrows-rotate"></i> Sync Cloud
+                    </button>
                     <button onclick="resetAllToDefault()" class="px-3 py-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 text-xs font-semibold">Reset Default</button>
                     <button onclick="closeAdminDashboard()" class="px-4 py-1.5 rounded-lg bg-white/15 hover:bg-white/25 text-xs font-semibold">Tutup Dashboard</button>
                 </div>
@@ -1343,6 +1345,12 @@
         </div>
     </div>
 
+    <!-- Cloud Loading Overlay (Initial Hydrate from Google Sheets) -->
+    <div id="cloud-hydrate-banner" class="fixed top-20 right-4 z-40 hidden items-center gap-2 px-3.5 py-2 rounded-full bg-brand-primary/95 text-cream-100 text-[11px] font-medium shadow-lg border border-brand-accent/30 backdrop-blur-xs">
+        <i class="fa-solid fa-rotate fa-spin text-brand-accent"></i>
+        <span>Memuat katalog terbaru dari Google Cloud...</span>
+    </div>
+
     <!-- Floating Toast Notification -->
     <div id="toast-notification" class="fixed bottom-5 left-1/2 -translate-x-1/2 z-50 hidden items-center gap-2.5 px-5 py-3 rounded-full bg-brand-primary text-white text-xs sm:text-sm font-medium shadow-2xl border border-brand-accent/40">
         <i class="fa-solid fa-circle-check text-brand-accent"></i>
@@ -1350,14 +1358,14 @@
     </div>
 
     <!-- =====================================================================
-         MODULAR JAVASCRIPT APPLICATION LOGIC
+         MODULAR JAVASCRIPT APPLICATION LOGIC & GOOGLE APPS SCRIPT SYNC ENGINE
     ====================================================================== -->
     <script>
         /**
          * ============================================================================
          * 0. KONFIGURASI PERMANEN VERCEL & GOOGLE SHEETS
          * Tempelkan URL Web App (/exec) dari Google Apps Script Anda di bawah ini
-         * sebelum upload ke Vercel agar semua pengunjung & perangkat otomatis sinkron!
+         * sebelum upload ke Vercel agar seluruh website 100% dikendalikan Google Sheets!
          * ============================================================================
          */
         const PERMANENT_GAS_WEB_APP_URL = '';
@@ -1559,6 +1567,200 @@
         };
 
         let autoSyncTimer = null;
+
+        /**
+         * ============================================================================
+         * CRAVE CLOUD SYNC ENGINE (GOOGLE APPS SCRIPT SINGLE-SOURCE-OF-TRUTH ENGINE)
+         * Menangani:
+         * 1. Hydrate otomatis saat web dibuka di Vercel/HP/Laptop
+         * 2. Antrean Push & Auto-Retry jika jaringan tidak stabil
+         * 3. Polling berkala di Admin Dashboard agar pesanan & log selalu real-time
+         * ============================================================================
+         */
+        const CraveCloudSyncEngine = {
+            queue: JSON.parse(localStorage.getItem('cp_sync_queue') || '[]'),
+            isSyncing: false,
+            lastSyncedAt: null,
+            pollInterval: null,
+
+            getEndpoint() {
+                return (PERMANENT_GAS_WEB_APP_URL || state.settings.gasUrl || '').trim();
+            },
+
+            saveQueue() {
+                localStorage.setItem('cp_sync_queue', JSON.stringify(this.queue));
+            },
+
+            enqueue(payload) {
+                const url = this.getEndpoint();
+                if (!url) {
+                    updateCloudSyncBadge('local', 'Mode Lokal (URL GAS Kosong)');
+                    return;
+                }
+                payload.sourceHost = window.location.hostname || 'Lokal';
+                payload._queuedAt = Date.now();
+
+                // Jika action adalah syncAll, ganti antrean syncAll lama agar tidak menumpuk
+                if (payload.action === 'syncAll') {
+                    this.queue = this.queue.filter(item => item.action !== 'syncAll');
+                }
+                this.queue.push(payload);
+                this.saveQueue();
+                this.processQueue();
+            },
+
+            async processQueue(notifySuccess = false) {
+                const url = this.getEndpoint();
+                if (!url || this.isSyncing || this.queue.length === 0) return;
+
+                this.isSyncing = true;
+                updateCloudSyncBadge('syncing', `Menyinkronkan (${this.queue.length})...`);
+
+                while (this.queue.length > 0) {
+                    const currentTask = this.queue[0];
+                    try {
+                        await fetch(url, {
+                            method: 'POST',
+                            mode: 'no-cors',
+                            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                            body: JSON.stringify(currentTask)
+                        });
+                        this.queue.shift();
+                        this.saveQueue();
+                        this.lastSyncedAt = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+                    } catch (err) {
+                        console.warn('Sync Engine Retry Scheduled:', err);
+                        updateCloudSyncBadge('error', 'Menunggu Koneksi (Auto-Retry)');
+                        this.isSyncing = false;
+                        setTimeout(() => this.processQueue(false), 5000);
+                        return;
+                    }
+                }
+
+                this.isSyncing = false;
+                updateCloudSyncBadge('synced', `Cloud Live • ${this.lastSyncedAt || 'Aktif'}`);
+                if (notifySuccess) {
+                    showToast('Seluruh data berhasil disinkronkan ke Google Sheets!');
+                }
+            },
+
+            async hydrateFromCloud(notify = false) {
+                const url = this.getEndpoint();
+                if (!url) {
+                    updateCloudSyncBadge('local', 'Mode Lokal');
+                    return false;
+                }
+
+                const banner = document.getElementById('cloud-hydrate-banner');
+                if (banner) {
+                    banner.classList.remove('hidden');
+                    banner.classList.add('flex');
+                }
+                updateCloudSyncBadge('syncing', 'Memuat Cloud...');
+
+                try {
+                    const cacheBuster = `${url}${url.includes('?') ? '&' : '?'}action=getAll&_t=${Date.now()}`;
+                    const res = await fetch(cacheBuster);
+                    const json = await res.json();
+
+                    if (json.status === 'success' && json.data) {
+                        const d = json.data;
+                        const hasCloudData =
+                            (Array.isArray(d.products) && d.products.length > 0) ||
+                            (d.config && d.config.settings);
+
+                        // Jika Google Sheets masih kosong total (baru pertama kali deploy), dorong data awal otomatis
+                        if (!hasCloudData) {
+                            await pushAllToGoogleSheets(false, {
+                                activity: 'Inisialisasi Database Cloud',
+                                detail: 'Mengunggah katalog & pengaturan awal ke Google Sheets'
+                            });
+                        } else {
+                            if (Array.isArray(d.products) && d.products.length > 0) {
+                                state.products = d.products;
+                            }
+                            if (Array.isArray(d.orders) && d.orders.length > 0) {
+                                state.orders = d.orders;
+                            }
+                            if (Array.isArray(d.logs) && d.logs.length > 0) {
+                                state.adminLogs = d.logs;
+                            }
+                            if (d.config && d.config.settings) {
+                                state.settings = {
+                                    ...state.settings,
+                                    ...d.config.settings,
+                                    gasUrl: url,
+                                    payment: {
+                                        ...state.settings.payment,
+                                        ...(d.config.settings.payment || {})
+                                    }
+                                };
+                                if (Array.isArray(d.config.builderBoxes) && d.config.builderBoxes.length > 0) {
+                                    state.builderBoxes = d.config.builderBoxes;
+                                }
+                                if (Array.isArray(d.config.builderItems) && d.config.builderItems.length > 0) {
+                                    state.builderItems = d.config.builderItems;
+                                }
+                                if (Array.isArray(d.config.trustSignals) && d.config.trustSignals.length > 0) {
+                                    state.trustSignals = d.config.trustSignals;
+                                }
+                                if (Array.isArray(d.config.testimonials) && d.config.testimonials.length > 0) {
+                                    state.testimonials = d.config.testimonials;
+                                }
+                            }
+
+                            persistState(false);
+                            applySavedSettingsToUI();
+                            renderTrustSignals();
+                            renderCatalog();
+                            renderBuilder();
+                            renderTestimonials();
+                            renderAdminProductsTable();
+                            renderAdminBuilderLists();
+                            renderAdminOrders();
+                            renderAdminLogs();
+                        }
+
+                        this.lastSyncedAt = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
+                        updateCloudSyncBadge('synced', `Cloud Live • ${this.lastSyncedAt}`);
+                        if (notify) showToast('Data terbaru berhasil ditarik dari Google Sheets!');
+                        return true;
+                    }
+                } catch (err) {
+                    console.warn('Cloud Hydrate Warning:', err);
+                    updateCloudSyncBadge('error', 'Offline / Cek URL GAS');
+                } finally {
+                    if (banner) {
+                        banner.classList.add('hidden');
+                        banner.classList.remove('flex');
+                    }
+                }
+                return false;
+            },
+
+            forceSyncNow() {
+                pushAllToGoogleSheets(true, {
+                    activity: 'Sinkronisasi Manual Cepat',
+                    detail: 'Pembaruan dipicu dari tombol Sync Cloud Admin'
+                });
+            },
+
+            startAdminLivePolling() {
+                this.stopAdminLivePolling();
+                this.pollInterval = setInterval(() => {
+                    if (!document.getElementById('admin-dashboard-modal').classList.contains('hidden') && this.queue.length === 0) {
+                        this.hydrateFromCloud(false);
+                    }
+                }, 25000);
+            },
+
+            stopAdminLivePolling() {
+                if (this.pollInterval) {
+                    clearInterval(this.pollInterval);
+                    this.pollInterval = null;
+                }
+            }
+        };
 
         function formatRp(num) {
             return 'Rp ' + Number(num || 0).toLocaleString('id-ID');
@@ -2419,6 +2621,12 @@
             renderAdminOrders();
             renderAdminLogs();
             document.getElementById('admin-dashboard-modal').classList.remove('hidden');
+            CraveCloudSyncEngine.startAdminLivePolling();
+        }
+
+        function closeAdminDashboard() {
+            document.getElementById('admin-dashboard-modal').classList.add('hidden');
+            CraveCloudSyncEngine.stopAdminLivePolling();
         }
 
         function closeAdminDashboard() {
@@ -3068,31 +3276,18 @@
         }
 
         async function postPayloadToGoogleSheets(payload) {
-            const url = state.settings.gasUrl;
+            const url = CraveCloudSyncEngine.getEndpoint();
             if (!url) return false;
-            try {
-                payload.sourceHost = window.location.hostname || 'Lokal';
-                await fetch(url, {
-                    method: 'POST',
-                    mode: 'no-cors',
-                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify(payload)
-                });
-                updateCloudSyncBadge('synced', 'Tersinkron Otomatis');
-                return true;
-            } catch (err) {
-                console.error('Google Sheets Sync Error:', err);
-                updateCloudSyncBadge('error', 'Gagal Sinkron');
-                return false;
-            }
+            CraveCloudSyncEngine.enqueue(payload);
+            return true;
         }
 
         async function pushOrderToGoogleSheets(orderObj) {
-            await postPayloadToGoogleSheets({ action: 'createOrder', order: orderObj });
+            CraveCloudSyncEngine.enqueue({ action: 'createOrder', order: orderObj });
         }
 
         async function syncOrderStatusToGoogleSheets(orderId, status, trackingInfo) {
-            await postPayloadToGoogleSheets({
+            CraveCloudSyncEngine.enqueue({
                 action: 'updateOrderStatus',
                 orderId: orderId,
                 status: status,
@@ -3101,12 +3296,11 @@
         }
 
         async function pushAllToGoogleSheets(notify = true, activityMeta = null) {
-            if (!state.settings.gasUrl) {
+            if (!CraveCloudSyncEngine.getEndpoint()) {
                 if (notify) showToast('Masukkan URL Web App Google Apps Script terlebih dahulu.');
                 return;
             }
-            updateCloudSyncBadge('syncing', 'Menyinkronkan...');
-            const ok = await postPayloadToGoogleSheets({
+            CraveCloudSyncEngine.enqueue({
                 action: 'syncAll',
                 products: state.products,
                 orders: state.orders,
@@ -3120,69 +3314,13 @@
                 activity: activityMeta ? activityMeta.activity : 'Sinkronisasi Penuh Manual',
                 detail: activityMeta ? activityMeta.detail : 'Seluruh data dikirim ke Google Sheets'
             });
-            if (ok && notify) {
-                showToast('Seluruh data berhasil disinkronkan ke Google Sheets!');
+            if (notify) {
+                showToast('Sinkronisasi ke Google Sheets sedang diproses...');
             }
         }
 
         async function pullAllFromGoogleSheets(notify = false) {
-            const url = state.settings.gasUrl;
-            if (!url) return;
-            try {
-                const res = await fetch(`${url}?action=getAll`);
-                const json = await res.json();
-                if (json.status === 'success' && json.data) {
-                    const d = json.data;
-                    if (Array.isArray(d.products) && d.products.length > 0) {
-                        state.products = d.products;
-                    }
-                    if (Array.isArray(d.orders) && d.orders.length > 0) {
-                        state.orders = d.orders;
-                    }
-                    if (Array.isArray(d.logs) && d.logs.length > 0) {
-                        state.adminLogs = d.logs;
-                    }
-                    if (d.config && d.config.settings) {
-                        state.settings = {
-                            ...state.settings,
-                            ...d.config.settings,
-                            gasUrl: url,
-                            payment: {
-                                ...state.settings.payment,
-                                ...(d.config.settings.payment || {})
-                            }
-                        };
-                        if (Array.isArray(d.config.builderBoxes) && d.config.builderBoxes.length > 0) {
-                            state.builderBoxes = d.config.builderBoxes;
-                        }
-                        if (Array.isArray(d.config.builderItems) && d.config.builderItems.length > 0) {
-                            state.builderItems = d.config.builderItems;
-                        }
-                        if (Array.isArray(d.config.trustSignals) && d.config.trustSignals.length > 0) {
-                            state.trustSignals = d.config.trustSignals;
-                        }
-                        if (Array.isArray(d.config.testimonials) && d.config.testimonials.length > 0) {
-                            state.testimonials = d.config.testimonials;
-                        }
-                    }
-
-                    persistState(false);
-                    applySavedSettingsToUI();
-                    renderTrustSignals();
-                    renderCatalog();
-                    renderBuilder();
-                    renderTestimonials();
-                    renderAdminProductsTable();
-                    renderAdminBuilderLists();
-                    renderAdminOrders();
-                    renderAdminLogs();
-                    updateCloudSyncBadge('synced', 'Tersinkron Otomatis');
-
-                    if (notify) showToast('Data terbaru berhasil ditarik dari Google Sheets!');
-                }
-            } catch (err) {
-                console.warn('Pull from Google Sheets skipped:', err);
-            }
+            await CraveCloudSyncEngine.hydrateFromCloud(notify);
         }
 
         function resetAllToDefault() {
@@ -3192,11 +3330,12 @@
             localStorage.removeItem('cp_trust_signals');
             localStorage.removeItem('cp_testimonials');
             localStorage.removeItem('cp_settings');
+            localStorage.removeItem('cp_sync_queue');
             location.reload();
         }
 
-        // Boot Application
-        document.addEventListener('DOMContentLoaded', () => {
+        // Boot Application (Google Sheets Cloud-First)
+        document.addEventListener('DOMContentLoaded', async () => {
             const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
             const chkDate = document.getElementById('chk-delivery-date');
             const b2bDate = document.getElementById('b2b-date');
@@ -3210,8 +3349,10 @@
             renderTestimonials();
             renderCart();
 
-            if (state.settings.gasUrl) {
-                pullAllFromGoogleSheets(false);
+            // Jalankan antrean yang tertunda & tarik data terbaru seutuhnya dari Google Apps Script
+            if (CraveCloudSyncEngine.getEndpoint()) {
+                await CraveCloudSyncEngine.processQueue(false);
+                await CraveCloudSyncEngine.hydrateFromCloud(false);
             }
         });
     </script>
