@@ -896,6 +896,9 @@
                 <button onclick="switchAdminTab('orders')" data-admintab="orders" class="admin-tab-btn py-3.5 text-xs sm:text-sm font-medium border-b-2 border-transparent text-stone-500 hover:text-brand-primary shrink-0">
                     <i class="fa-solid fa-receipt mr-1.5"></i> Pesanan & B2B (<span id="admin-order-count">0</span>)
                 </button>
+                <button onclick="switchAdminTab('logs')" data-admintab="logs" class="admin-tab-btn py-3.5 text-xs sm:text-sm font-medium border-b-2 border-transparent text-stone-500 hover:text-brand-primary shrink-0">
+                    <i class="fa-solid fa-clock-rotate-left mr-1.5"></i> Log Aktivitas (<span id="admin-log-count">0</span>)
+                </button>
                 <button onclick="switchAdminTab('settings')" data-admintab="settings" class="admin-tab-btn py-3.5 text-xs sm:text-sm font-medium border-b-2 border-transparent text-stone-500 hover:text-brand-primary shrink-0">
                     <i class="fa-solid fa-sliders mr-1.5"></i> SEO, Pembayaran & PIN
                 </button>
@@ -1227,6 +1230,24 @@
                     </div>
                 </div>
 
+                <!-- TAB 5B: ADMIN ACTIVITY AUDIT LOG (SYNCED WITH GOOGLE SHEETS) -->
+                <div id="admin-tab-logs" class="admin-tab-panel hidden space-y-4">
+                    <div class="bg-white p-5 rounded-2xl border border-cream-200 space-y-4">
+                        <div class="flex flex-wrap justify-between items-center gap-2 border-b border-cream-200 pb-3">
+                            <div>
+                                <h3 class="font-serif text-xl font-bold text-brand-primary">Log Aktivitas & Perubahan Panel Admin</h3>
+                                <p class="text-[11px] text-stone-500">Semua perubahan katalog, tema, pembayaran & status pesanan tercatat otomatis ke tab <code>Log_Aktivitas_Admin</code> di Google Sheets.</p>
+                            </div>
+                            <button type="button" onclick="pullAllFromGoogleSheets(true)" class="px-3.5 py-2 rounded-xl bg-cream-100 hover:bg-cream-200 text-brand-primary text-xs font-bold">
+                                <i class="fa-solid fa-rotate mr-1"></i> Refresh Log Cloud
+                            </button>
+                        </div>
+                        <div id="admin-activity-logs-list" class="space-y-2.5 text-xs max-h-[55vh] overflow-y-auto pr-1">
+                            <p class="text-stone-400 italic">Belum ada aktivitas admin tercatat.</p>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- TAB 6: SEO, PAYMENT ACCOUNTS (QRIS & BANK VA), WHATSAPP & SECURITY PIN -->
                 <div id="admin-tab-settings" class="admin-tab-panel hidden space-y-6">
                     <div class="bg-white p-6 rounded-2xl border border-cream-200 space-y-5">
@@ -1503,6 +1524,7 @@
             testimonials: JSON.parse(localStorage.getItem('cp_testimonials')) || DEFAULT_TESTIMONIALS,
             cart: JSON.parse(localStorage.getItem('cp_cart')) || [],
             orders: JSON.parse(localStorage.getItem('cp_orders')) || [],
+            adminLogs: JSON.parse(localStorage.getItem('cp_admin_logs')) || [],
             settings: {
                 brandName: savedSettings.brandName || PERMANENT_STORE_CONFIG.brandName,
                 logoDataUrl: savedSettings.logoDataUrl || '',
@@ -1531,29 +1553,31 @@
             activeCategory: 'Semua',
             builder: {
                 selectedBoxId: 'box-hardbox',
-                selectedItems: { 'bi-1': 1, 'bi-3': 1 }
+                selectedItems: {}
             },
             lastInvoiceText: ''
         };
 
-        // Utility: Format Rupiah
-        const formatRp = (num) => 'Rp ' + Number(num || 0).toLocaleString('id-ID');
-
-        // Persist State + Automatic Cloud Sync Trigger
         let autoSyncTimer = null;
-        function updateCloudSyncBadge(statusType, text) {
-            const badge = document.getElementById('cloud-sync-badge');
-            if (!badge) return;
-            const iconMap = {
-                idle: '<i class="fa-solid fa-cloud text-brand-accent"></i>',
-                syncing: '<i class="fa-solid fa-arrows-rotate fa-spin text-amber-300"></i>',
-                synced: '<i class="fa-solid fa-cloud-check text-emerald-300"></i>',
-                error: '<i class="fa-solid fa-triangle-exclamation text-rose-300"></i>'
-            };
-            badge.innerHTML = `${iconMap[statusType] || iconMap.idle}<span>${text}</span>`;
+
+        function formatRp(num) {
+            return 'Rp ' + Number(num || 0).toLocaleString('id-ID');
         }
 
-        function persistState(triggerCloudSync = false) {
+        function updateCloudSyncBadge(status, text) {
+            const badge = document.getElementById('cloud-sync-badge');
+            if (!badge) return;
+            const iconClass = status === 'synced'
+                ? 'fa-solid fa-cloud-check text-emerald-400'
+                : status === 'syncing'
+                    ? 'fa-solid fa-rotate fa-spin text-brand-accent'
+                    : status === 'error'
+                        ? 'fa-solid fa-triangle-exclamation text-rose-400'
+                        : 'fa-solid fa-cloud text-brand-accent';
+            badge.innerHTML = `<i class="${iconClass}"></i><span>${text}</span>`;
+        }
+
+        function persistState(triggerCloudSync = false, activityMeta = null) {
             localStorage.setItem('cp_products', JSON.stringify(state.products));
             localStorage.setItem('cp_builder_boxes', JSON.stringify(state.builderBoxes));
             localStorage.setItem('cp_builder_items', JSON.stringify(state.builderItems));
@@ -1563,123 +1587,120 @@
             localStorage.setItem('cp_orders', JSON.stringify(state.orders));
             localStorage.setItem('cp_settings', JSON.stringify(state.settings));
 
+            if (activityMeta && activityMeta.activity) {
+                state.adminLogs.unshift({
+                    time: new Date().toLocaleString('id-ID'),
+                    activity: activityMeta.activity,
+                    detail: activityMeta.detail || '-',
+                    source: window.location.hostname || 'Lokal'
+                });
+                if (state.adminLogs.length > 50) state.adminLogs.length = 50;
+                localStorage.setItem('cp_admin_logs', JSON.stringify(state.adminLogs));
+                renderAdminLogs();
+            }
+
             if (triggerCloudSync && state.settings.gasUrl) {
-                updateCloudSyncBadge('syncing', 'Menyinkronkan otomatis...');
+                updateCloudSyncBadge('syncing', 'Menyinkronkan...');
                 clearTimeout(autoSyncTimer);
                 autoSyncTimer = setTimeout(() => {
-                    pushAllToGoogleSheets(false);
-                }, 1200);
+                    pushAllToGoogleSheets(false, activityMeta);
+                }, 800);
             }
         }
 
-        // Toast Helper
         function showToast(msg) {
             const toast = document.getElementById('toast-notification');
-            document.getElementById('toast-message').textContent = msg;
+            const label = document.getElementById('toast-message');
+            if (!toast || !label) return;
+            label.textContent = msg;
             toast.classList.remove('hidden');
             toast.classList.add('flex');
             clearTimeout(window._toastTimer);
             window._toastTimer = setTimeout(() => {
                 toast.classList.add('hidden');
                 toast.classList.remove('flex');
-            }, 3200);
+            }, 3000);
         }
 
         /**
-         * 2. INITIALIZATION & THEME / SETTINGS APPLICATION
+         * 2. UI INITIALIZATION & DYNAMIC CONTENT RENDERING
          */
-        document.addEventListener('DOMContentLoaded', () => {
-            applySavedSettingsToUI();
-            renderTrustSignals();
-            renderTestimonials();
-            renderCatalog();
-            renderBuilder();
-            renderCart();
-
-            // Set minimum date for delivery pickers to tomorrow
-            const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
-            const chkDate = document.getElementById('chk-delivery-date');
-            const b2bDate = document.getElementById('b2b-date');
-            if (chkDate) chkDate.min = tomorrow;
-            if (b2bDate) b2bDate.min = tomorrow;
-
-            // Auto-pull latest data if Google Apps Script URL is configured & auto-refresh every 60s
-            if (state.settings.gasUrl) {
-                updateCloudSyncBadge('syncing', 'Memuat data cloud...');
-                pullAllFromGoogleSheets(false);
-                setInterval(() => {
-                    if (document.visibilityState === 'visible' && !autoSyncTimer) {
-                        pullAllFromGoogleSheets(false);
-                    }
-                }, 60000);
-            }
-        });
-
         function applySavedSettingsToUI() {
             const s = state.settings;
-            document.title = s.seoTitle || PERMANENT_STORE_CONFIG.seoTitle;
-            const metaTitleEl = document.getElementById('meta-title');
-            const metaDescEl = document.getElementById('meta-desc');
-            if (metaTitleEl) metaTitleEl.textContent = s.seoTitle || PERMANENT_STORE_CONFIG.seoTitle;
-            if (metaDescEl && s.seoDesc) metaDescEl.setAttribute('content', s.seoDesc);
+            document.title = s.seoTitle;
+            const metaDesc = document.getElementById('meta-desc');
+            if (metaDesc) metaDesc.setAttribute('content', s.seoDesc);
 
-            document.getElementById('brand-name-display').textContent = s.brandName;
-            document.getElementById('footer-brand-name').textContent = s.brandName;
-            document.getElementById('footer-copyright-brand').textContent = `2026 ${s.brandName} Indonesia`;
-            document.getElementById('footer-address').innerHTML = `${s.address}<br>Buka Setiap Hari: 08.00 – 21.00 WIB`;
-            document.getElementById('footer-wa-display').textContent = `WhatsApp: +${s.waNumber}`;
-            document.getElementById('event-banner-text').textContent = s.bannerText;
+            // Brand Name & Logo
+            ['brand-name-display', 'footer-brand-name'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = s.brandName;
+            });
+            const copyEl = document.getElementById('footer-copyright-brand');
+            if (copyEl) copyEl.textContent = `2026 ${s.brandName} Indonesia`;
 
-            // Hero Dynamic Texts & Image
-            const heroBadge = document.getElementById('hero-badge-display');
-            if (heroBadge) heroBadge.textContent = s.heroBadge;
-            const heroTitle = document.getElementById('hero-title-display');
-            if (heroTitle) heroTitle.innerHTML = s.heroTitle;
-            const heroSub = document.getElementById('hero-subtitle-display');
-            if (heroSub) heroSub.textContent = s.heroSubtitle;
-            const heroCta1 = document.getElementById('hero-cta1-display');
-            if (heroCta1) heroCta1.textContent = s.heroCta1;
-            const heroCta2 = document.getElementById('hero-cta2-display');
-            if (heroCta2) heroCta2.textContent = s.heroCta2;
-            const heroRating = document.getElementById('hero-rating-display');
-            if (heroRating) heroRating.textContent = s.heroRating;
-            const heroCardTitle = document.getElementById('hero-card-title-display');
-            if (heroCardTitle) heroCardTitle.textContent = s.heroCardTitle;
-            const heroCardSub = document.getElementById('hero-card-sub-display');
-            if (heroCardSub) heroCardSub.textContent = s.heroCardSub;
-            if (s.heroImage) {
-                document.getElementById('hero-showcase-img').src = s.heroImage;
-            }
-
-            // Custom Logo HD
             const logoImg = document.getElementById('brand-logo-img');
             const logoIcon = document.getElementById('brand-logo-icon');
-            if (s.logoDataUrl) {
+            if (s.logoDataUrl && logoImg && logoIcon) {
                 logoImg.src = s.logoDataUrl;
                 logoImg.classList.remove('hidden');
                 logoIcon.classList.add('hidden');
-            } else {
+            } else if (logoImg && logoIcon) {
                 logoImg.classList.add('hidden');
                 logoIcon.classList.remove('hidden');
             }
 
-            // Event Theme Class
-            document.body.className = 'bg-brand-surface text-stone-800 font-sans antialiased selection:bg-brand-accent selection:text-white';
+            // Theme & Banner
             const themeObj = EVENT_THEMES[s.theme] || EVENT_THEMES.default;
-            if (themeObj.className) document.body.classList.add(themeObj.className);
+            document.body.className = `bg-brand-surface text-stone-800 font-sans antialiased selection:bg-brand-accent selection:text-white ${themeObj.className}`;
+            const bannerEl = document.getElementById('event-banner-text');
+            if (bannerEl) bannerEl.textContent = s.bannerText || themeObj.banner;
+
+            // Hero Content
+            const heroMap = {
+                'hero-badge-display': s.heroBadge,
+                'hero-subtitle-display': s.heroSubtitle,
+                'hero-cta1-display': s.heroCta1,
+                'hero-cta2-display': s.heroCta2,
+                'hero-rating-display': s.heroRating,
+                'hero-card-title-display': s.heroCardTitle,
+                'hero-card-sub-display': s.heroCardSub
+            };
+            Object.entries(heroMap).forEach(([id, val]) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = val;
+            });
+            const heroTitleEl = document.getElementById('hero-title-display');
+            if (heroTitleEl) heroTitleEl.innerHTML = s.heroTitle;
+
+            const heroImgEl = document.getElementById('hero-showcase-img');
+            if (heroImgEl && s.heroImage) heroImgEl.src = s.heroImage;
+
+            // Footer Contact
+            const addrEl = document.getElementById('footer-address');
+            if (addrEl) addrEl.innerHTML = `${s.address}<br>Buka Setiap Hari: 08.00 – 21.00 WIB`;
+            const waEl = document.getElementById('footer-wa-display');
+            if (waEl) waEl.textContent = `WhatsApp: +${s.waNumber}`;
+
+            // Cloud Badge
+            if (s.gasUrl) {
+                updateCloudSyncBadge('synced', 'Cloud Terhubung');
+            } else {
+                updateCloudSyncBadge('local', 'Mode Lokal');
+            }
         }
 
         function renderTrustSignals() {
             const grid = document.getElementById('trust-signals-grid');
             if (!grid) return;
-            grid.innerHTML = state.trustSignals.map(t => `
-                <div class="flex items-start gap-3.5 p-4 rounded-2xl bg-cream-50/80 border border-cream-200/80 h-full">
-                    <div class="w-10 h-10 rounded-xl bg-brand-primary/10 text-brand-primary flex items-center justify-center shrink-0">
-                        <i class="fa-solid ${t.icon}"></i>
+            grid.innerHTML = state.trustSignals.map(item => `
+                <div class="h-full p-5 rounded-2xl bg-cream-50 border border-cream-200 flex items-start gap-3.5">
+                    <div class="w-10 h-10 rounded-xl bg-brand-primary text-brand-accent flex items-center justify-center shrink-0">
+                        <i class="fa-solid ${item.icon}"></i>
                     </div>
                     <div>
-                        <h3 class="font-bold text-sm text-brand-primary leading-snug">${t.title}</h3>
-                        <p class="text-xs text-stone-500 mt-1 leading-relaxed">${t.desc}</p>
+                        <h3 class="font-bold text-sm text-brand-primary">${item.title}</h3>
+                        <p class="text-xs text-stone-500 mt-1 leading-relaxed">${item.desc}</p>
                     </div>
                 </div>
             `).join('');
@@ -1689,34 +1710,36 @@
             const grid = document.getElementById('testimonials-grid');
             if (!grid) return;
             grid.innerHTML = state.testimonials.map(t => `
-                <div class="p-6 rounded-2xl bg-cream-50 border border-cream-200 space-y-4 flex flex-col justify-between">
+                <div class="p-6 rounded-2xl bg-cream-50 border border-cream-200 flex flex-col justify-between space-y-4">
                     <div class="space-y-3">
-                        <div class="flex text-gold-500 text-xs gap-1">
-                            <i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i>
+                        <div class="flex items-center justify-between">
+                            <div class="flex text-gold-500 text-xs">
+                                <i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i><i class="fa-solid fa-star"></i>
+                            </div>
+                            <span class="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-brand-primary/10 text-brand-primary">${t.tag}</span>
                         </div>
-                        <p class="text-sm text-stone-700 leading-relaxed italic">"${t.quote}"</p>
+                        <p class="text-xs sm:text-sm text-stone-700 italic leading-relaxed">"${t.quote}"</p>
                     </div>
-                    <div class="flex items-center justify-between pt-3 border-t border-cream-200">
-                        <div>
-                            <p class="font-bold text-sm text-brand-primary">${t.name}</p>
-                            <p class="text-[11px] text-stone-500">${t.role}</p>
-                        </div>
-                        <span class="px-2.5 py-1 rounded-full bg-brand-primary/10 text-brand-primary text-[10px] font-bold uppercase">${t.tag}</span>
+                    <div class="pt-3 border-t border-cream-200">
+                        <p class="font-bold text-sm text-brand-primary">${t.name}</p>
+                        <p class="text-[11px] text-stone-500">${t.role}</p>
                     </div>
                 </div>
             `).join('');
         }
 
         /**
-         * 3. INTERACTIVE CATALOG & FILTERING
+         * 3. CATALOG FILTERING & RENDERING
          */
-        function setCategoryFilter(category) {
-            state.activeCategory = category;
+        function setCategoryFilter(cat) {
+            state.activeCategory = cat;
             document.querySelectorAll('.cat-btn').forEach(btn => {
-                if (btn.dataset.cat === category) {
-                    btn.className = 'cat-btn active shrink-0 px-4 py-2 rounded-full text-xs sm:text-sm font-semibold transition-all bg-brand-primary text-white';
+                if (btn.dataset.cat === cat) {
+                    btn.classList.add('active', 'bg-brand-primary', 'text-white');
+                    btn.classList.remove('bg-cream-100', 'text-stone-700');
                 } else {
-                    btn.className = 'cat-btn shrink-0 px-4 py-2 rounded-full text-xs sm:text-sm font-semibold transition-all bg-cream-100 text-stone-700 hover:bg-cream-200';
+                    btn.classList.remove('active', 'bg-brand-primary', 'text-white');
+                    btn.classList.add('bg-cream-100', 'text-stone-700');
                 }
             });
             renderCatalog();
@@ -1724,101 +1747,84 @@
 
         function renderCatalog() {
             const grid = document.getElementById('catalog-grid');
-            const searchQuery = (document.getElementById('catalog-search')?.value || '').toLowerCase();
-            const priceFilter = document.getElementById('price-filter')?.value || 'all';
-            const sortFilter = document.getElementById('sort-filter')?.value || 'featured';
+            if (!grid) return;
+            const search = (document.getElementById('catalog-search')?.value || '').toLowerCase().trim();
+            const priceRange = document.getElementById('price-filter')?.value || 'all';
+            const sortBy = document.getElementById('sort-filter')?.value || 'featured';
 
             let filtered = state.products.filter(p => {
                 const matchCat = state.activeCategory === 'Semua' || p.category === state.activeCategory;
-                const matchSearch = p.name.toLowerCase().includes(searchQuery) ||
-                                    p.items.some(i => i.toLowerCase().includes(searchQuery)) ||
-                                    p.category.toLowerCase().includes(searchQuery);
+                const matchSearch = !search ||
+                    p.name.toLowerCase().includes(search) ||
+                    (Array.isArray(p.items) && p.items.join(' ').toLowerCase().includes(search));
                 let matchPrice = true;
-                if (priceFilter === 'budget') matchPrice = p.price < 350000;
-                else if (priceFilter === 'mid') matchPrice = p.price >= 350000 && p.price <= 750000;
-                else if (priceFilter === 'vip') matchPrice = p.price > 750000;
-
+                if (priceRange === 'budget') matchPrice = p.price < 350000;
+                else if (priceRange === 'mid') matchPrice = p.price >= 350000 && p.price <= 750000;
+                else if (priceRange === 'vip') matchPrice = p.price > 750000;
                 return matchCat && matchSearch && matchPrice;
             });
 
-            if (sortFilter === 'price-asc') filtered.sort((a, b) => a.price - b.price);
-            else if (sortFilter === 'price-desc') filtered.sort((a, b) => b.price - a.price);
+            if (sortBy === 'price-asc') filtered.sort((a, b) => a.price - b.price);
+            else if (sortBy === 'price-desc') filtered.sort((a, b) => b.price - a.price);
 
             if (filtered.length === 0) {
                 grid.innerHTML = `
-                    <div class="col-span-full text-center py-14 bg-white rounded-3xl border border-cream-200 space-y-3">
+                    <div class="col-span-full text-center py-14 bg-white rounded-3xl border border-cream-200 space-y-2">
                         <i class="fa-solid fa-box-open text-3xl text-stone-300"></i>
-                        <p class="font-serif text-2xl font-bold text-brand-primary">Paket Tidak Ditemukan</p>
-                        <p class="text-xs text-stone-500">Coba ubah kata kunci pencarian atau rakit paket impian Anda di fitur Custom Hamper Builder.</p>
-                        <a href="#custom-builder" class="inline-block mt-2 px-5 py-2.5 rounded-full bg-brand-primary text-white text-xs font-bold">Rakit Hampers Sendiri</a>
+                        <p class="font-serif text-xl font-bold text-brand-primary">Paket Hampers Tidak Ditemukan</p>
+                        <p class="text-xs text-stone-500">Coba ubah filter kategori atau kata kunci pencarian Anda.</p>
                     </div>
                 `;
                 return;
             }
 
             grid.innerHTML = filtered.map(p => {
-                const imgFitClass = p.imageFit === 'contain' ? 'object-contain p-2' : 'object-cover';
-                const imgPosClass = p.imagePos || 'object-center';
+                const fitClass = p.imageFit === 'contain' ? 'object-contain p-2 bg-cream-100' : 'object-cover';
+                const posClass = p.imagePos || 'object-center';
+                const previewItems = Array.isArray(p.items) ? p.items.slice(0, 3).join(' • ') : '';
                 return `
-                <article class="group bg-white rounded-3xl border border-cream-200 overflow-hidden luxury-shadow hover:-translate-y-1 transition-all duration-300 flex flex-col">
-                    <!-- Product Image -->
-                    <div class="relative aspect-[4/3] bg-cream-100 overflow-hidden">
-                        <img src="${p.image}" alt="${p.name}" loading="lazy" class="w-full h-full ${imgFitClass} ${imgPosClass} group-hover:scale-105 transition-transform duration-500">
-                        ${p.badge ? `<span class="absolute top-3.5 left-3.5 px-3 py-1 rounded-full text-[11px] font-bold bg-brand-primary text-brand-accent shadow-md">${p.badge}</span>` : ''}
-                        <span class="absolute top-3.5 right-3.5 px-2.5 py-1 rounded-full text-[10px] font-semibold bg-white/90 backdrop-blur-xs text-stone-700">${p.category}</span>
-                    </div>
-
-                    <!-- Product Body -->
-                    <div class="p-5 sm:p-6 flex-1 flex flex-col justify-between space-y-4">
+                    <article class="bg-white rounded-3xl border border-cream-200 overflow-hidden luxury-shadow flex flex-col justify-between group hover:-translate-y-1 transition-all duration-300">
                         <div>
-                            <h3 class="font-serif text-xl sm:text-2xl font-bold text-brand-primary leading-snug group-hover:text-gold-700 transition-colors">${p.name}</h3>
-                            <p class="text-xs text-stone-500 mt-2 line-clamp-2 leading-relaxed">
-                                <span class="font-semibold text-stone-700">Isi:</span> ${p.items.join(' • ')}
-                            </p>
+                            <div class="relative aspect-[4/3] bg-cream-100 overflow-hidden">
+                                <img src="${p.image}" alt="${p.name}" loading="lazy" class="w-full h-full ${fitClass} ${posClass} group-hover:scale-105 transition-transform duration-500">
+                                ${p.badge ? `<span class="absolute top-3.5 left-3.5 px-3 py-1 rounded-full text-[11px] font-bold bg-brand-primary text-brand-accent shadow-md">${p.badge}</span>` : ''}
+                                <span class="absolute bottom-3 right-3 px-2.5 py-1 rounded-lg bg-white/90 backdrop-blur-xs text-[10px] font-bold uppercase tracking-wider text-brand-primary">${p.category}</span>
+                            </div>
+                            <div class="p-5 sm:p-6 space-y-2.5">
+                                <h3 class="font-serif text-xl sm:text-2xl font-bold text-brand-primary leading-snug">${p.name}</h3>
+                                <p class="text-xs text-stone-500 line-clamp-2 leading-relaxed">${previewItems}</p>
+                            </div>
                         </div>
 
-                        <div class="pt-3 border-t border-cream-100 space-y-3">
-                            <div class="flex items-baseline justify-between gap-2">
+                        <div class="px-5 pb-5 sm:px-6 sm:pb-6 pt-3 border-t border-cream-100 space-y-3">
+                            <div class="flex items-baseline justify-between">
                                 <div>
                                     <span class="text-[10px] uppercase tracking-wider text-stone-400 block">Harga Paket</span>
                                     <span class="font-serif text-2xl font-bold text-brand-primary">${formatRp(p.price)}</span>
                                 </div>
-                                <span class="text-[11px] text-emerald-700 font-semibold bg-emerald-50 px-2.5 py-0.5 rounded-full">
+                                <span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full">
                                     <i class="fa-solid fa-envelope-open-text mr-1"></i>Free Card
                                 </span>
                             </div>
 
-                            <div class="grid grid-cols-12 gap-2">
-                                <button onclick="openProductModal('${p.id}')" class="col-span-4 py-2.5 px-2 rounded-xl border border-cream-300 hover:border-brand-primary text-stone-700 hover:text-brand-primary text-xs font-semibold transition-all">
-                                    Detail
+                            <div class="grid grid-cols-2 gap-2">
+                                <button onclick="openProductModal('${p.id}')" class="py-2.5 px-3 rounded-xl border border-brand-primary/25 text-brand-primary hover:bg-cream-100 text-xs font-bold transition-colors">
+                                    Lihat Detail
                                 </button>
-                                <button onclick="addToCart('${p.id}')" class="col-span-5 py-2.5 px-3 rounded-xl bg-brand-primary hover:bg-brand-secondary text-white text-xs font-bold transition-all flex items-center justify-center gap-1.5">
-                                    <i class="fa-solid fa-plus text-brand-accent"></i>
-                                    <span>Keranjang</span>
-                                </button>
-                                <button onclick="quickOrderNow('${p.id}')" title="Pesan Langsung" class="col-span-3 py-2.5 px-2 rounded-xl bg-brand-accent/25 hover:bg-brand-accent text-brand-primary font-bold text-xs transition-all flex items-center justify-center gap-1">
-                                    <i class="fa-solid fa-bolt"></i>
-                                    <span>Beli</span>
+                                <button onclick="addToCart('${p.id}')" class="py-2.5 px-3 rounded-xl bg-brand-primary hover:bg-brand-secondary text-white text-xs font-bold transition-colors flex items-center justify-center gap-1.5">
+                                    <i class="fa-solid fa-plus text-brand-accent"></i> Keranjang
                                 </button>
                             </div>
                         </div>
-                    </div>
-                </article>
-            `}).join('');
+                    </article>
+                `;
+            }).join('');
         }
 
-        function openProductModal(productId) {
-            const p = state.products.find(item => item.id === productId);
+        function openProductModal(id) {
+            const p = state.products.find(item => item.id === id);
             if (!p) return;
-
-            const modalImg = document.getElementById('modal-prod-img');
-            modalImg.src = p.image;
-            modalImg.className = `w-full h-full ${p.imageFit === 'contain' ? 'object-contain p-4' : 'object-cover'} ${p.imagePos || 'object-center'}`;
-            document.getElementById('modal-prod-cat').textContent = `Kategori: ${p.category}`;
-            document.getElementById('modal-prod-name').textContent = p.name;
-            document.getElementById('modal-prod-price').textContent = formatRp(p.price);
-            document.getElementById('modal-prod-desc').textContent = p.description || 'Bingkisan eksklusif terkurasi dengan standar pengemasan aman.';
-
+            document.getElementById('modal-prod-img').src = p.image;
             const badgeEl = document.getElementById('modal-prod-badge');
             if (p.badge) {
                 badgeEl.textContent = p.badge;
@@ -1826,12 +1832,16 @@
             } else {
                 badgeEl.classList.add('hidden');
             }
-
-            document.getElementById('modal-prod-items').innerHTML = p.items.map(i => `
-                <li class="flex items-center gap-2"><i class="fa-solid fa-check text-emerald-700 text-[10px]"></i><span>${i}</span></li>
+            document.getElementById('modal-prod-cat').textContent = p.category;
+            document.getElementById('modal-prod-name').textContent = p.name;
+            document.getElementById('modal-prod-price').textContent = formatRp(p.price);
+            document.getElementById('modal-prod-desc').textContent = p.description || '';
+            document.getElementById('modal-prod-items').innerHTML = (p.items || []).map(i => `
+                <li class="flex items-center gap-2"><i class="fa-solid fa-check text-gold-600 text-[10px]"></i><span>${i}</span></li>
             `).join('');
 
-            document.getElementById('modal-add-btn').onclick = () => {
+            const addBtn = document.getElementById('modal-add-btn');
+            addBtn.onclick = () => {
                 addToCart(p.id);
                 closeProductModal();
             };
@@ -1848,42 +1858,48 @@
         }
 
         /**
-         * 4. INTERACTIVE CUSTOM HAMPER BUILDER LOGIC
+         * 4. INTERACTIVE CUSTOM HAMPER BUILDER
          */
         function renderBuilder() {
-            const boxesGrid = document.getElementById('builder-boxes-grid');
-            boxesGrid.innerHTML = state.builderBoxes.map(box => {
-                const isSelected = state.builder.selectedBoxId === box.id;
+            const boxGrid = document.getElementById('builder-boxes-grid');
+            const itemGrid = document.getElementById('builder-items-grid');
+            if (!boxGrid || !itemGrid) return;
+
+            if (!state.builderBoxes.some(b => b.id === state.builder.selectedBoxId) && state.builderBoxes.length > 0) {
+                state.builder.selectedBoxId = state.builderBoxes[0].id;
+            }
+
+            boxGrid.innerHTML = state.builderBoxes.map(b => {
+                const isSelected = state.builder.selectedBoxId === b.id;
                 return `
-                    <button type="button" onclick="selectBuilderBox('${box.id}')" class="p-4 rounded-2xl border text-left transition-all ${isSelected ? 'bg-brand-accent text-emerald-950 border-brand-accent shadow-lg' : 'bg-white/5 text-white border-white/15 hover:bg-white/10'}">
-                        <div class="flex justify-between items-start">
-                            <span class="font-bold text-sm block">${box.name}</span>
-                            ${isSelected ? '<i class="fa-solid fa-circle-check text-emerald-950"></i>' : ''}
+                    <button type="button" onclick="selectBuilderBox('${b.id}')" class="p-4 rounded-2xl border text-left transition-all ${isSelected ? 'bg-brand-accent text-emerald-950 border-brand-accent shadow-lg' : 'bg-white/5 text-white border-white/15 hover:bg-white/10'}">
+                        <div class="flex items-center justify-between mb-1">
+                            <span class="font-bold text-sm">${b.name}</span>
+                            ${isSelected ? '<i class="fa-solid fa-circle-check"></i>' : ''}
                         </div>
-                        <span class="text-xs font-extrabold block mt-1 ${isSelected ? 'text-emerald-900' : 'text-brand-accent'}">${formatRp(box.price)}</span>
-                        <span class="text-[11px] block mt-1.5 ${isSelected ? 'text-emerald-950/80' : 'text-cream-200/70'}">${box.desc}</span>
+                        <p class="text-[11px] ${isSelected ? 'text-emerald-900/80' : 'text-cream-200/70'}">${b.desc}</p>
+                        <p class="font-bold text-xs mt-2">${formatRp(b.price)}</p>
                     </button>
                 `;
             }).join('');
 
-            const itemsGrid = document.getElementById('builder-items-grid');
-            itemsGrid.innerHTML = state.builderItems.map(item => {
+            itemGrid.innerHTML = state.builderItems.map(item => {
                 const qty = state.builder.selectedItems[item.id] || 0;
                 return `
-                    <div class="p-3.5 rounded-xl border ${qty > 0 ? 'bg-white/15 border-brand-accent' : 'bg-white/5 border-white/10'} flex items-center justify-between gap-3">
+                    <div class="p-3.5 rounded-xl bg-white/5 border border-white/15 flex items-center justify-between gap-3">
                         <div class="flex items-center gap-3 min-w-0">
                             <div class="w-9 h-9 rounded-lg bg-brand-accent/20 text-brand-accent flex items-center justify-center shrink-0">
-                                <i class="fa-solid ${item.icon}"></i>
+                                <i class="fa-solid ${item.icon || 'fa-gift'} text-sm"></i>
                             </div>
                             <div class="min-w-0">
                                 <p class="text-xs sm:text-sm font-semibold text-white truncate">${item.name}</p>
-                                <p class="text-[11px] text-brand-accent font-medium">${formatRp(item.price)} <span class="text-white/40">• ${item.category}</span></p>
+                                <p class="text-[11px] text-brand-accent font-medium">${formatRp(item.price)} • ${item.category}</p>
                             </div>
                         </div>
                         <div class="flex items-center gap-2 shrink-0">
-                            <button type="button" onclick="changeBuilderItemQty('${item.id}', -1)" class="w-7 h-7 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-bold">-</button>
+                            <button type="button" onclick="updateBuilderItemQty('${item.id}', -1)" class="w-7 h-7 rounded-lg bg-white/10 hover:bg-white/20 text-white text-xs font-bold">-</button>
                             <span class="w-5 text-center text-xs font-bold text-white">${qty}</span>
-                            <button type="button" onclick="changeBuilderItemQty('${item.id}', 1)" class="w-7 h-7 rounded-lg bg-brand-accent text-emerald-950 text-xs font-bold">+</button>
+                            <button type="button" onclick="updateBuilderItemQty('${item.id}', 1)" class="w-7 h-7 rounded-lg bg-brand-accent text-emerald-950 text-xs font-bold">+</button>
                         </div>
                     </div>
                 `;
@@ -1894,28 +1910,18 @@
 
         function selectBuilderBox(boxId) {
             state.builder.selectedBoxId = boxId;
-            const box = state.builderBoxes.find(b => b.id === boxId) || state.builderBoxes[0];
-            if (!box) return;
-            // Trim excess items if new box has smaller capacity
-            let totalSlots = Object.values(state.builder.selectedItems).reduce((a, b) => a + b, 0);
-            if (totalSlots > box.capacity) {
-                state.builder.selectedItems = {};
-                showToast(`Kapasitas wadah ${box.name} maksimal ${box.capacity} item. Pilihan item disesuaikan.`);
-            }
             renderBuilder();
         }
 
-        function changeBuilderItemQty(itemId, delta) {
-            const box = state.builderBoxes.find(b => b.id === state.builder.selectedBoxId) || state.builderBoxes[0];
-            if (!box) return;
+        function updateBuilderItemQty(itemId, delta) {
+            const box = state.builderBoxes.find(b => b.id === state.builder.selectedBoxId) || { capacity: 5 };
             const currentTotal = Object.values(state.builder.selectedItems).reduce((a, b) => a + b, 0);
             const currentQty = state.builder.selectedItems[itemId] || 0;
 
             if (delta > 0 && currentTotal >= box.capacity) {
-                showToast(`Kapasitas maksimal ${box.name} adalah ${box.capacity} item!`);
+                showToast(`Kapasitas maksimal ${box.name} adalah ${box.capacity} item.`);
                 return;
             }
-
             const nextQty = Math.max(0, currentQty + delta);
             if (nextQty === 0) delete state.builder.selectedItems[itemId];
             else state.builder.selectedItems[itemId] = nextQty;
@@ -1924,372 +1930,361 @@
         }
 
         function updateBuilderSummary() {
-            const box = state.builderBoxes.find(b => b.id === state.builder.selectedBoxId) || state.builderBoxes[0];
-            if (!box) return;
-            let totalSlots = 0;
-            let totalPrice = box.price;
-            const listHtml = [];
-
-            Object.entries(state.builder.selectedItems).forEach(([id, qty]) => {
-                const item = state.builderItems.find(i => i.id === id);
-                if (item && qty > 0) {
-                    totalSlots += qty;
-                    totalPrice += item.price * qty;
-                    listHtml.push(`<li class="flex justify-between"><span>${qty}x ${item.name}</span><span class="font-semibold">${formatRp(item.price * qty)}</span></li>`);
-                }
-            });
+            const box = state.builderBoxes.find(b => b.id === state.builder.selectedBoxId) || { name: 'Custom Box', price: 0, capacity: 5 };
+            const totalSlots = Object.values(state.builder.selectedItems).reduce((a, b) => a + b, 0);
 
             document.getElementById('builder-capacity-label').textContent = `Terpilih: ${totalSlots} / ${box.capacity} Slot`;
             document.getElementById('summary-box-name').textContent = `${box.name} (${formatRp(box.price)})`;
-            document.getElementById('summary-items-list').innerHTML = listHtml.length ? listHtml.join('') : '<li class="text-stone-400 italic">Pilih minimal 1 item isian...</li>';
-            document.getElementById('builder-total-price').textContent = formatRp(totalPrice);
 
-            const toVal = document.getElementById('builder-card-to').value.trim();
-            const msgVal = document.getElementById('builder-card-msg').value.trim();
-            const previewEl = document.getElementById('summary-card-preview');
-            if (toVal || msgVal) {
-                previewEl.textContent = `"Untuk ${toVal || 'Penerima'}: ${msgVal || 'Selamat merayakan hari spesial!'}"`;
+            let itemsTotal = 0;
+            const listEl = document.getElementById('summary-items-list');
+            const entries = Object.entries(state.builder.selectedItems);
+
+            if (entries.length === 0) {
+                listEl.innerHTML = '<li class="text-stone-400 italic">Belum ada item dipilih...</li>';
             } else {
-                previewEl.textContent = '"Untuk: [Penerima] — Ucapan hangat Anda akan dicetak di kartu linen eksklusif."';
+                listEl.innerHTML = entries.map(([id, qty]) => {
+                    const it = state.builderItems.find(x => x.id === id);
+                    if (!it) return '';
+                    itemsTotal += it.price * qty;
+                    return `<li class="flex justify-between"><span>${qty}x ${it.name}</span><span class="font-semibold">${formatRp(it.price * qty)}</span></li>`;
+                }).join('');
             }
+
+            const toVal = document.getElementById('builder-card-to')?.value.trim();
+            const msgVal = document.getElementById('builder-card-msg')?.value.trim();
+            document.getElementById('summary-card-preview').textContent = (toVal || msgVal)
+                ? `"Untuk: ${toVal || 'Penerima'} — ${msgVal || 'Ucapan spesial Anda'}"`
+                : '"Untuk: [Penerima] — Ucapan hangat Anda akan dicetak di kartu linen eksklusif."';
+
+            document.getElementById('builder-total-price').textContent = formatRp(box.price + itemsTotal);
         }
 
         function addCustomHamperToCart() {
-            const box = state.builderBoxes.find(b => b.id === state.builder.selectedBoxId) || state.builderBoxes[0];
-            if (!box) return;
-            const selectedEntries = Object.entries(state.builder.selectedItems);
-            if (selectedEntries.length === 0) {
-                showToast('Silakan pilih minimal 1 produk isian terlebih dahulu.');
+            const entries = Object.entries(state.builder.selectedItems);
+            if (entries.length === 0) {
+                showToast('Pilih minimal 1 item isian hampers terlebih dahulu.');
                 return;
             }
-
-            let totalPrice = box.price;
-            const itemDescriptions = [`Wadah: ${box.name}`];
-            selectedEntries.forEach(([id, qty]) => {
-                const item = state.builderItems.find(i => i.id === id);
-                if (item) {
-                    totalPrice += item.price * qty;
-                    itemDescriptions.push(`${qty}x ${item.name}`);
+            const box = state.builderBoxes.find(b => b.id === state.builder.selectedBoxId) || state.builderBoxes[0];
+            let total = box.price;
+            const detailList = [];
+            entries.forEach(([id, qty]) => {
+                const it = state.builderItems.find(x => x.id === id);
+                if (it) {
+                    total += it.price * qty;
+                    detailList.push(`${qty}x ${it.name}`);
                 }
             });
 
-            const cardTo = document.getElementById('builder-card-to').value.trim();
-            const cardFrom = document.getElementById('builder-card-from').value.trim();
-            const cardMsg = document.getElementById('builder-card-msg').value.trim();
+            const toVal = document.getElementById('builder-card-to')?.value.trim();
+            const fromVal = document.getElementById('builder-card-from')?.value.trim();
+            const msgVal = document.getElementById('builder-card-msg')?.value.trim();
+
+            if (toVal) document.getElementById('chk-card-to').value = toVal;
+            if (fromVal) document.getElementById('chk-card-from').value = fromVal;
+            if (msgVal) document.getElementById('chk-card-msg').value = msgVal;
 
             state.cart.push({
                 id: 'custom-' + Date.now(),
                 name: `Custom Hamper (${box.name})`,
-                price: totalPrice,
+                price: total,
                 qty: 1,
-                image: 'https://images.unsplash.com/photo-1549465220-1a8b9238cd48?auto=format&fit=crop&w=400&q=80',
-                customDetails: itemDescriptions.join(', '),
-                prefillCard: { to: cardTo, from: cardFrom, msg: cardMsg }
+                image: state.settings.heroImage,
+                customSummary: detailList.join(', ')
             });
 
-            // Prefill checkout greeting card if user filled it in builder
-            if (cardTo) document.getElementById('chk-card-to').value = cardTo;
-            if (cardFrom) document.getElementById('chk-card-from').value = cardFrom;
-            if (cardMsg) document.getElementById('chk-card-msg').value = cardMsg;
-
-            persistState();
+            persistState(false);
             renderCart();
-            showToast('Custom Hampers berhasil ditambahkan ke keranjang!');
             toggleCart(true);
+            showToast('Custom Hampers berhasil ditambahkan ke keranjang!');
         }
 
         /**
-         * 5. SHOPPING CART & DIRECT CHECKOUT FLOW
+         * 5. CART, DIRECT CHECKOUT & CORPORATE B2B
          */
         function addToCart(productId) {
-            const product = state.products.find(p => p.id === productId);
-            if (!product) return;
-
+            const prod = state.products.find(p => p.id === productId);
+            if (!prod) return;
             const existing = state.cart.find(c => c.id === productId);
-            if (existing) {
-                existing.qty += 1;
-            } else {
+            if (existing) existing.qty += 1;
+            else {
                 state.cart.push({
-                    id: product.id,
-                    name: product.name,
-                    price: product.price,
+                    id: prod.id,
+                    name: prod.name,
+                    price: prod.price,
                     qty: 1,
-                    image: product.image,
-                    customDetails: product.items.slice(0, 3).join(', ') + '...'
+                    image: prod.image
                 });
             }
-
-            persistState();
+            persistState(false);
             renderCart();
-            showToast(`"${product.name}" ditambahkan ke keranjang!`);
+            showToast(`"${prod.name}" ditambahkan ke keranjang.`);
         }
 
-        function quickOrderNow(productId) {
-            addToCart(productId);
-            toggleCart(true);
-        }
-
-        function updateCartQty(index, delta) {
-            if (!state.cart[index]) return;
-            state.cart[index].qty += delta;
-            if (state.cart[index].qty <= 0) {
-                state.cart.splice(index, 1);
-            }
-            persistState();
+        function updateCartQty(idx, delta) {
+            if (!state.cart[idx]) return;
+            state.cart[idx].qty += delta;
+            if (state.cart[idx].qty <= 0) state.cart.splice(idx, 1);
+            persistState(false);
             renderCart();
         }
 
         function clearCart() {
             state.cart = [];
-            persistState();
+            persistState(false);
             renderCart();
+        }
+
+        function toggleCart(open) {
+            const drawer = document.getElementById('cart-drawer');
+            if (!drawer) return;
+            if (open) {
+                renderCart();
+                drawer.classList.remove('hidden');
+            } else {
+                drawer.classList.add('hidden');
+            }
+        }
+
+        function toggleMultiAddressNote() {
+            const isMulti = document.getElementById('chk-multi-address')?.checked;
+            const label = document.getElementById('chk-address-label');
+            const input = document.getElementById('chk-address');
+            if (isMulti) {
+                label.textContent = 'Daftar Multi-Alamat Pengiriman & Rincian Penerima *';
+                input.placeholder = 'Contoh: Alamat 1 (Bpk. Andi - Jl. Sudirman No 10, Jakarta), Alamat 2 (Ibu Sari - Jl. Darmo No 5, Surabaya)...';
+            } else {
+                label.textContent = 'Alamat Lengkap Pengiriman *';
+                input.placeholder = 'Jalan, No. Rumah, Kecamatan, Kota, Kode Pos...';
+            }
         }
 
         function renderCart() {
             const totalQty = state.cart.reduce((sum, item) => sum + item.qty, 0);
-            const subtotal = state.cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
-
-            document.getElementById('cart-badge').textContent = totalQty;
-            document.getElementById('cart-subtotal').textContent = formatRp(subtotal);
+            const badge = document.getElementById('cart-badge');
+            if (badge) badge.textContent = totalQty;
 
             const container = document.getElementById('cart-items-container');
-            const checkoutForm = document.getElementById('checkout-form');
+            const form = document.getElementById('checkout-form');
+            if (!container || !form) return;
 
             if (state.cart.length === 0) {
                 container.innerHTML = `
                     <div class="text-center py-10 bg-white rounded-2xl border border-cream-200 space-y-2">
                         <i class="fa-solid fa-bag-shopping text-3xl text-stone-300"></i>
-                        <p class="font-serif text-xl font-bold text-brand-primary">Keranjang Belanja Kosong</p>
-                        <p class="text-xs text-stone-500">Pilih hampers dari katalog atau rakit paket custom Anda.</p>
+                        <p class="text-sm font-semibold text-stone-600">Keranjang Anda masih kosong</p>
+                        <p class="text-xs text-stone-400">Pilih paket dari katalog atau rakit hampers sendiri.</p>
                     </div>
                 `;
-                checkoutForm.classList.add('hidden');
+                form.classList.add('hidden');
                 return;
             }
 
-            checkoutForm.classList.remove('hidden');
-            container.innerHTML = state.cart.map((item, idx) => `
-                <div class="bg-white p-3.5 rounded-2xl border border-cream-200 flex gap-3 items-center">
-                    <img src="${item.image}" alt="${item.name}" class="w-16 h-16 rounded-xl object-cover shrink-0 bg-cream-100">
-                    <div class="flex-1 min-w-0">
-                        <h5 class="font-bold text-xs sm:text-sm text-brand-primary truncate">${item.name}</h5>
-                        <p class="text-[11px] text-stone-400 truncate">${item.customDetails || ''}</p>
-                        <p class="text-xs font-bold text-gold-700 mt-1">${formatRp(item.price * item.qty)}</p>
+            form.classList.remove('hidden');
+            let subtotal = 0;
+            container.innerHTML = state.cart.map((item, idx) => {
+                subtotal += item.price * item.qty;
+                return `
+                    <div class="bg-white p-3.5 rounded-2xl border border-cream-200 flex items-center gap-3">
+                        <img src="${item.image}" alt="${item.name}" class="w-16 h-16 rounded-xl object-cover shrink-0 bg-cream-100">
+                        <div class="flex-1 min-w-0">
+                            <h5 class="font-bold text-xs sm:text-sm text-brand-primary truncate">${item.name}</h5>
+                            ${item.customSummary ? `<p class="text-[10px] text-stone-500 truncate">${item.customSummary}</p>` : ''}
+                            <p class="text-xs font-bold text-gold-700 mt-0.5">${formatRp(item.price)}</p>
+                        </div>
+                        <div class="flex items-center gap-1.5 shrink-0">
+                            <button type="button" onclick="updateCartQty(${idx}, -1)" class="w-7 h-7 rounded-lg bg-cream-100 hover:bg-cream-200 text-xs font-bold">-</button>
+                            <span class="w-5 text-center text-xs font-bold">${item.qty}</span>
+                            <button type="button" onclick="updateCartQty(${idx}, 1)" class="w-7 h-7 rounded-lg bg-brand-primary text-white text-xs font-bold">+</button>
+                        </div>
                     </div>
-                    <div class="flex items-center gap-1.5 shrink-0">
-                        <button type="button" onclick="updateCartQty(${idx}, -1)" class="w-7 h-7 rounded-lg bg-cream-100 hover:bg-cream-200 text-xs font-bold">-</button>
-                        <span class="w-5 text-center text-xs font-bold">${item.qty}</span>
-                        <button type="button" onclick="updateCartQty(${idx}, 1)" class="w-7 h-7 rounded-lg bg-brand-primary text-white text-xs font-bold">+</button>
-                    </div>
-                </div>
-            `).join('');
-        }
+                `;
+            }).join('');
 
-        function toggleCart(open) {
-            const drawer = document.getElementById('cart-drawer');
-            if (open) drawer.classList.remove('hidden');
-            else drawer.classList.add('hidden');
-        }
-
-        function toggleMultiAddressNote() {
-            const isMulti = document.getElementById('chk-multi-address').checked;
-            const label = document.getElementById('chk-address-label');
-            const textarea = document.getElementById('chk-address');
-            if (isMulti) {
-                label.textContent = 'Daftar Multi-Alamat / Catatan Pengiriman Banyak Tujuan *';
-                textarea.placeholder = 'Contoh: 5 box ke Jl. Sudirman No. 10 (Ibu Rina), 5 box ke Jl. Thamrin No. 5 (Bpk. Andi)...';
-            } else {
-                label.textContent = 'Alamat Lengkap Pengiriman *';
-                textarea.placeholder = 'Jalan, No. Rumah, Kecamatan, Kota, Kode Pos...';
-            }
+            document.getElementById('cart-subtotal').textContent = formatRp(subtotal);
         }
 
         function processDirectCheckout(e) {
             e.preventDefault();
             if (state.cart.length === 0) return;
 
+            const invCode = 'CP-' + String(Date.now()).slice(-6);
             const senderName = document.getElementById('chk-sender-name').value.trim();
             const senderWa = document.getElementById('chk-sender-wa').value.trim();
             const recipientName = document.getElementById('chk-recipient-name').value.trim();
             const recipientWa = document.getElementById('chk-recipient-wa').value.trim();
-            const isMulti = document.getElementById('chk-multi-address').checked;
             const address = document.getElementById('chk-address').value.trim();
             const cardTo = document.getElementById('chk-card-to').value.trim();
             const cardFrom = document.getElementById('chk-card-from').value.trim();
             const cardMsg = document.getElementById('chk-card-msg').value.trim();
             const deliveryDate = document.getElementById('chk-delivery-date').value;
-            const paymentMethod = document.querySelector('input[name="payment_method"]:checked').value;
+            const paymentMethod = document.querySelector('input[name="payment_method"]:checked')?.value || 'Transfer Bank';
 
-            const total = state.cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
-            const invoiceCode = 'CP-' + Math.floor(100000 + Math.random() * 900000);
+            const total = state.cart.reduce((s, i) => s + (i.price * i.qty), 0);
+            const itemsSummary = state.cart.map(i => `${i.qty}x ${i.name}${i.customSummary ? ' [' + i.customSummary + ']' : ''}`).join('; ');
 
-            const itemsSummary = state.cart.map(i => `• ${i.qty}x ${i.name} (${formatRp(i.price * i.qty)})`).join('\n');
-
-            const orderRecord = {
-                id: invoiceCode,
+            const orderObj = {
+                id: invCode,
                 type: 'Direct Checkout',
                 status: 'Baru / Menunggu Bayar',
                 date: new Date().toLocaleString('id-ID'),
                 customer: `${senderName} (${senderWa})`,
-                recipient: `${recipientName} (${recipientWa}) - Jadwal: ${deliveryDate}`,
+                recipient: `${recipientName} (${recipientWa}) - ${address} [Kirim: ${deliveryDate}]`,
                 total: total,
                 payment: paymentMethod,
-                items: state.cart.map(i => `${i.qty}x ${i.name}`).join(', '),
+                items: itemsSummary,
                 greetingCard: `To: ${cardTo} | From: ${cardFrom} | "${cardMsg}"`,
                 trackingInfo: ''
             };
 
-            state.orders.unshift(orderRecord);
-            pushOrderToGoogleSheets(orderRecord);
-
-            const waText = `*HALO ${state.settings.brandName.toUpperCase()}! SAYA INGIN KONFIRMASI PESANAN*
-No. Invoice: *${invoiceCode}*
---------------------------------
-*RINCIAN HAMPERS:*
-${itemsSummary}
-*Subtotal Produk: ${formatRp(total)}*
-
-*DATA PENGIRIMAN:*
-• Pengirim: ${senderName} (${senderWa})
-• Penerima: ${recipientName} (${recipientWa})
-• Tipe Alamat: ${isMulti ? 'Multi-Alamat' : 'Alamat Tunggal'}
-• Alamat: ${address}
-• *Jadwal Kirim: ${deliveryDate}*
-
-*KARTU UCAPAN (GRATIS):*
-• Untuk: ${cardTo}
-• Dari: ${cardFrom}
-• Ucapan: "${cardMsg}"
-
-*METODE PEMBAYARAN:*
-${paymentMethod}
---------------------------------
-Mohon info total beserta ongkos kirim agar segera saya proses pembayarannya. Terima kasih!`;
-
-            state.lastInvoiceText = waText;
-
-            // Clear cart & close drawer
+            state.orders.unshift(orderObj);
             state.cart = [];
-            persistState();
+            persistState(false);
             renderCart();
             toggleCart(false);
 
-            // Show Invoice Modal
-            document.getElementById('inv-code').textContent = invoiceCode;
+            if (state.settings.gasUrl) {
+                pushOrderToGoogleSheets(orderObj);
+            }
+
+            showInvoiceModal(orderObj, deliveryDate, address);
+        }
+
+        function showInvoiceModal(orderObj, deliveryDate, address) {
+            window._lastCreatedInvoiceId = orderObj.id;
+            document.getElementById('inv-code').textContent = orderObj.id;
+
             document.getElementById('inv-summary-box').innerHTML = `
-                <div class="flex justify-between"><span class="text-stone-500">Total Tagihan:</span><strong class="text-brand-primary">${formatRp(total)}</strong></div>
-                <div class="flex justify-between"><span class="text-stone-500">Metode Bayar:</span><strong>${paymentMethod}</strong></div>
-                <div class="flex justify-between"><span class="text-stone-500">Jadwal Kirim:</span><strong>${deliveryDate}</strong></div>
-                <div class="pt-2 border-t border-cream-200">
-                    <span class="text-stone-500 block">Kartu Ucapan:</span>
-                    <p class="italic text-stone-700 mt-0.5">To ${cardTo}: "${cardMsg}" — From ${cardFrom}</p>
+                <div class="flex justify-between"><span class="text-stone-500">Pemesan:</span><span class="font-bold text-stone-800">${orderObj.customer}</span></div>
+                <div class="flex justify-between"><span class="text-stone-500">Jadwal Kirim:</span><span class="font-bold text-brand-primary">${deliveryDate}</span></div>
+                <div class="flex justify-between"><span class="text-stone-500">Metode Bayar:</span><span class="font-bold text-stone-800">${orderObj.payment}</span></div>
+                <div class="pt-2 border-t border-cream-200 flex justify-between items-center">
+                    <span class="font-bold text-stone-700">Total Tagihan:</span>
+                    <span class="font-serif text-xl font-bold text-brand-primary">${formatRp(orderObj.total)}</span>
                 </div>
             `;
 
-            // Render Owner Payment Details (QRIS / Virtual Account / Bank Transfer / E-Wallet)
-            const pay = state.settings.payment || PERMANENT_STORE_CONFIG.payment;
+            const pay = state.settings.payment || {};
             const payBox = document.getElementById('inv-payment-details');
-            if (payBox) {
-                if (paymentMethod.includes('QRIS')) {
-                    payBox.innerHTML = pay.qrisImage
-                        ? `<span class="text-[11px] font-bold uppercase tracking-wider text-brand-primary block">Scan QRIS Resmi ${state.settings.brandName}</span>
-                           <img src="${pay.qrisImage}" alt="QRIS ${state.settings.brandName}" class="w-44 h-44 mx-auto rounded-xl object-contain bg-white p-2 border border-cream-300 shadow-sm">
-                           <p class="text-[11px] text-stone-600">Nominal transfer: <strong>${formatRp(total)}</strong>. Simpan bukti bayar lalu klik tombol WhatsApp di bawah.</p>`
-                        : `<span class="text-[11px] font-bold uppercase tracking-wider text-brand-primary block">Pembayaran QRIS / Transfer Bank</span>
-                           <p class="text-xs text-stone-600">Silakan transfer ke <strong>${pay.bank1Name}: ${pay.bank1Number}</strong> (a.n ${pay.bank1Holder}) atau minta kode QRIS dinamis melalui tombol WhatsApp di bawah.</p>`;
-                } else if (paymentMethod.includes('Virtual Account')) {
-                    payBox.innerHTML = `
-                        <span class="text-[11px] font-bold uppercase tracking-wider text-brand-primary block">Transfer Bank / Virtual Account Resmi</span>
-                        <div class="bg-white p-3 rounded-xl border border-cream-200 space-y-1.5 text-left text-xs">
-                            <div class="flex items-center justify-between gap-2">
-                                <div>
-                                    <span class="text-[10px] text-stone-400 block">${pay.bank1Name}</span>
-                                    <strong class="font-mono text-sm text-brand-primary">${pay.bank1Number}</strong>
-                                    <span class="text-[11px] text-stone-600 block">a.n ${pay.bank1Holder}</span>
-                                </div>
-                                <button type="button" onclick="copyBankNumber('${pay.bank1Number}')" class="px-2.5 py-1.5 rounded-lg bg-brand-accent/20 text-brand-primary font-bold text-[11px] hover:bg-brand-accent/30 shrink-0">
-                                    <i class="fa-regular fa-copy mr-1"></i>Salin
-                                </button>
-                            </div>
-                            ${pay.bank2Number ? `<div class="pt-1.5 border-t border-cream-100 flex items-center justify-between gap-2">
-                                <div>
-                                    <span class="text-[10px] text-stone-400 block">${pay.bank2Name}</span>
-                                    <strong class="font-mono text-xs text-brand-primary">${pay.bank2Number}</strong>
-                                </div>
-                                <button type="button" onclick="copyBankNumber('${pay.bank2Number}')" class="px-2 py-1 rounded-lg bg-cream-100 text-stone-700 font-semibold text-[10px] shrink-0">Salin</button>
-                            </div>` : ''}
+            if (orderObj.payment.includes('QRIS') && pay.qrisImage) {
+                payBox.innerHTML = `
+                    <span class="text-[11px] font-bold uppercase tracking-wider text-brand-primary block">Scan QRIS Resmi ${state.settings.brandName}</span>
+                    <img src="${pay.qrisImage}" alt="QRIS Pembayaran" class="w-44 h-44 mx-auto rounded-xl bg-white p-2 border border-cream-200 object-contain">
+                    <p class="text-[11px] text-stone-500">Screenshot bukti bayar lalu klik tombol WhatsApp di bawah.</p>
+                `;
+            } else {
+                payBox.innerHTML = `
+                    <span class="text-[11px] font-bold uppercase tracking-wider text-brand-primary block">Tujuan Pembayaran Resmi</span>
+                    <div class="bg-white p-3 rounded-xl border border-cream-200 text-xs space-y-1">
+                        <p class="font-bold text-brand-primary">${pay.bank1Name || 'Bank Transfer'}</p>
+                        <div class="flex items-center justify-center gap-2">
+                            <span class="font-mono text-base font-bold tracking-wider text-stone-800">${pay.bank1Number || '-'}</span>
+                            <button type="button" onclick="copyTextValue('${pay.bank1Number || ''}')" class="px-2 py-0.5 rounded bg-cream-200 text-[10px] font-bold text-brand-primary">Salin</button>
                         </div>
-                    `;
-                } else {
-                    payBox.innerHTML = `
-                        <span class="text-[11px] font-bold uppercase tracking-wider text-brand-primary block">Pembayaran E-Wallet Owner</span>
-                        <p class="text-xs font-semibold text-stone-800 bg-white p-2.5 rounded-xl border border-cream-200">${pay.ewalletInfo}</p>
-                        <p class="text-[11px] text-stone-500">Transfer sesuai nominal <strong>${formatRp(total)}</strong> lalu kirim bukti ke WhatsApp Admin.</p>
-                    `;
-                }
+                        <p class="text-[11px] text-stone-500">a.n ${pay.bank1Holder || state.settings.brandName}</p>
+                    </div>
+                    ${pay.ewalletInfo ? `<p class="text-[11px] text-stone-600 font-medium">${pay.ewalletInfo}</p>` : ''}
+                `;
             }
 
+            const waText = `Halo ${state.settings.brandName}, saya ingin konfirmasi pesanan:\n` +
+                `*No. Invoice:* ${orderObj.id}\n` +
+                `*Pemesan:* ${orderObj.customer}\n` +
+                `*Paket:* ${orderObj.items}\n` +
+                `*Kartu Ucapan:* ${orderObj.greetingCard}\n` +
+                `*Jadwal Kirim:* ${deliveryDate}\n` +
+                `*Alamat:* ${address}\n` +
+                `*Total:* ${formatRp(orderObj.total)} (${orderObj.payment})`;
+
+            state.lastInvoiceText = waText;
             document.getElementById('inv-wa-link').href = `https://wa.me/${state.settings.waNumber}?text=${encodeURIComponent(waText)}`;
 
-            const invModal = document.getElementById('invoice-modal');
-            invModal.classList.remove('hidden');
-            invModal.classList.add('flex');
+            const modal = document.getElementById('invoice-modal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
         }
 
-        function copyBankNumber(num) {
-            const temp = document.createElement('textarea');
-            temp.value = num;
-            document.body.appendChild(temp);
-            temp.select();
-            document.execCommand('copy');
-            document.body.removeChild(temp);
-            showToast(`Nomor rekening ${num} berhasil disalin!`);
+        function copyTextValue(val) {
+            if (!val) return;
+            navigator.clipboard?.writeText(val);
+            showToast('Nomor rekening disalin: ' + val);
         }
 
         function copyInvoiceText() {
-            const temp = document.createElement('textarea');
-            temp.value = state.lastInvoiceText;
-            document.body.appendChild(temp);
-            temp.select();
-            document.execCommand('copy');
-            document.body.removeChild(temp);
-            showToast('Rincian pesanan berhasil disalin ke clipboard!');
+            if (!state.lastInvoiceText) return;
+            navigator.clipboard?.writeText(state.lastInvoiceText);
+            showToast('Rincian pesanan berhasil disalin!');
         }
 
         function closeInvoiceModal() {
-            const invModal = document.getElementById('invoice-modal');
-            invModal.classList.add('hidden');
-            invModal.classList.remove('flex');
+            const modal = document.getElementById('invoice-modal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
         }
 
         function openTrackingFromInvoice() {
-            const code = document.getElementById('inv-code').textContent.trim();
             closeInvoiceModal();
-            openTrackingModal(code);
+            openTrackingModal(window._lastCreatedInvoiceId || '');
+        }
+
+        function submitB2BQuotation(e) {
+            e.preventDefault();
+            const b2bId = 'B2B-' + String(Date.now()).slice(-4);
+            const pic = document.getElementById('b2b-pic').value.trim();
+            const company = document.getElementById('b2b-company').value.trim();
+            const wa = document.getElementById('b2b-wa').value.trim();
+            const qty = document.getElementById('b2b-qty').value;
+            const budget = document.getElementById('b2b-budget').value;
+            const date = document.getElementById('b2b-date').value;
+            const notes = document.getElementById('b2b-notes').value.trim();
+
+            const orderObj = {
+                id: b2bId,
+                type: 'Corporate Quotation',
+                status: 'Baru / Menunggu Bayar',
+                date: new Date().toLocaleString('id-ID'),
+                customer: `${pic} (${wa})`,
+                recipient: `${company} [Target: ${date}]`,
+                total: 0,
+                payment: 'Corporate Invoice / PO',
+                items: `${qty} | Budget: ${budget}`,
+                greetingCard: notes || 'Custom Corporate Logo & Card',
+                trackingInfo: ''
+            };
+
+            state.orders.unshift(orderObj);
+            persistState(false);
+
+            if (state.settings.gasUrl) {
+                pushOrderToGoogleSheets(orderObj);
+            }
+
+            const msg = `Halo Tim Corporate ${state.settings.brandName},\nSaya ingin mengajukan penawaran parcel perusahaan:\n` +
+                `*ID Inquiry:* ${b2bId}\n` +
+                `*PIC:* ${pic}\n` +
+                `*Perusahaan:* ${company}\n` +
+                `*Jumlah:* ${qty}\n` +
+                `*Budget/Paket:* ${budget}\n` +
+                `*Target Kirim:* ${date}\n` +
+                `*Catatan:* ${notes || '-'}`;
+
+            window.open(`https://wa.me/${state.settings.waNumber}?text=${encodeURIComponent(msg)}`, '_blank');
+            e.target.reset();
+            showToast('Permintaan penawaran B2B dicatat & diteruskan ke WhatsApp!');
         }
 
         /**
-         * 5B. CUSTOMER ORDER TRACKING MODAL & LIVE LOOKUP
+         * 6. CUSTOMER ORDER TRACKING
          */
-        function openTrackingModal(prefillCode = '') {
+        function openTrackingModal(prefillQuery = '') {
             const modal = document.getElementById('tracking-modal');
             const input = document.getElementById('tracking-query-input');
-            const container = document.getElementById('tracking-result-container');
-
             modal.classList.remove('hidden');
             modal.classList.add('flex');
-
-            if (prefillCode) {
-                input.value = prefillCode;
-                searchCustomerOrder(null, prefillCode);
-            } else {
-                input.value = '';
-                container.innerHTML = `
-                    <div class="p-4 rounded-2xl bg-cream-50 border border-cream-200 text-center text-xs text-stone-500">
-                        Masukkan kode invoice yang Anda terima saat checkout untuk melihat progres perakitan dan pengiriman paket Anda.
-                    </div>
-                `;
-                setTimeout(() => input.focus(), 100);
+            if (prefillQuery) {
+                input.value = prefillQuery;
+                searchCustomerOrder(new Event('submit'));
             }
         }
 
@@ -2299,47 +2294,37 @@ Mohon info total beserta ongkos kirim agar segera saya proses pembayarannya. Ter
             modal.classList.remove('flex');
         }
 
-        async function searchCustomerOrder(e, directQuery = '') {
+        async function searchCustomerOrder(e) {
             if (e) e.preventDefault();
-            const rawQuery = (directQuery || document.getElementById('tracking-query-input').value || '').trim();
-            if (!rawQuery) return;
+            const query = document.getElementById('tracking-query-input').value.trim();
+            if (!query) return;
 
             const container = document.getElementById('tracking-result-container');
-            const submitBtn = document.getElementById('tracking-submit-btn');
-            const qLower = rawQuery.toLowerCase();
+            container.innerHTML = `<div class="p-6 text-center text-xs text-stone-500"><i class="fa-solid fa-spinner fa-spin mr-1"></i> Mencari data pesanan...</div>`;
 
-            // 1. Cari dari state lokal terlebih dahulu
+            const qLower = query.toLowerCase();
             let matched = state.orders.filter(o =>
                 String(o.id).toLowerCase() === qLower ||
                 String(o.customer).toLowerCase().includes(qLower)
             );
 
-            // 2. Jika terhubung ke Google Sheets, tarik status terbaru dari cloud
-            const url = getActiveGasUrl();
-            if (url) {
-                if (submitBtn) submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+            if (matched.length === 0 && state.settings.gasUrl) {
                 try {
-                    const res = await fetch(`${url}?action=trackOrder&query=${encodeURIComponent(rawQuery)}&t=${Date.now()}`);
+                    const res = await fetch(`${state.settings.gasUrl}?action=trackOrder&query=${encodeURIComponent(query)}`);
                     const json = await res.json();
-                    if (json.status === 'success' && Array.isArray(json.orders) && json.orders.length > 0) {
+                    if (json.status === 'success' && Array.isArray(json.orders)) {
                         matched = json.orders;
                     }
                 } catch (err) {
-                    console.warn('Fallback ke data lokal tracking:', err);
-                } finally {
-                    if (submitBtn) submitBtn.innerHTML = '<i class="fa-solid fa-magnifying-glass mr-1"></i> Lacak';
+                    console.warn('Cloud tracking lookup fallback:', err);
                 }
             }
 
             if (matched.length === 0) {
                 container.innerHTML = `
                     <div class="p-5 rounded-2xl bg-rose-50 border border-rose-200 text-center space-y-2">
-                        <i class="fa-solid fa-circle-exclamation text-rose-500 text-xl"></i>
-                        <p class="font-bold text-sm text-rose-900">Pesanan Tidak Ditemukan</p>
-                        <p class="text-xs text-rose-700">Pastikan Nomor Invoice (misal <strong>CP-123456</strong>) atau Nomor WhatsApp sesuai saat pemesanan, atau hubungi Admin kami.</p>
-                        <a href="https://wa.me/${state.settings.waNumber}?text=${encodeURIComponent('Halo Crave Parcel, saya ingin menanyakan status pesanan dengan kode/nomor: ' + rawQuery)}" target="_blank" class="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-emerald-600 text-white text-xs font-bold mt-1">
-                            <i class="fa-brands fa-whatsapp"></i> Tanya Admin via WhatsApp
-                        </a>
+                        <p class="font-bold text-xs text-rose-800">Pesanan "${query}" Belum Ditemukan</p>
+                        <p class="text-[11px] text-rose-600">Pastikan kode invoice (contoh: CP-123456) atau nomor WhatsApp sesuai saat pemesanan.</p>
                     </div>
                 `;
                 return;
@@ -2349,126 +2334,62 @@ Mohon info total beserta ongkos kirim agar segera saya proses pembayarannya. Ter
         }
 
         function renderTrackingCard(o) {
-            const statusMap = {
-                'Baru / Menunggu Bayar': 1,
-                'Penawaran Baru': 1,
-                'Lunas / Diproses': 2,
-                'Dalam Pengiriman': 3,
-                'Selesai': 4
-            };
-            const currentStep = statusMap[o.status] || 1;
+            const st = String(o.status || '');
+            let step = 1;
+            if (st.includes('Perakitan') || st.includes('Diproses')) step = 2;
+            else if (st.includes('Pengiriman') || st.includes('Dikirim')) step = 3;
+            else if (st.includes('Selesai') || st.includes('Tiba')) step = 4;
+
             const steps = [
-                { step: 1, label: 'Pesanan Diterima', desc: 'Menunggu konfirmasi pembayaran / DP' },
-                { step: 2, label: 'Lunas & Perakitan', desc: 'Tim studio merakit & QC bingkisan Anda' },
-                { step: 3, label: 'Dalam Pengiriman', desc: o.trackingInfo ? `Kurir / Resi: ${o.trackingInfo}` : 'Paket sedang diantar menuju alamat penerima' },
-                { step: 4, label: 'Pesanan Tiba', desc: 'Hampers telah diterima dengan baik' }
+                { num: 1, label: 'Pesanan Diterima' },
+                { num: 2, label: 'Perakitan & QC' },
+                { num: 3, label: 'Dalam Pengiriman' },
+                { num: 4, label: 'Tiba di Tujuan' }
             ];
 
-            const askWaUrl = `https://wa.me/${state.settings.waNumber}?text=${encodeURIComponent(`Halo ${state.settings.brandName}, saya ingin menanyakan update pengiriman untuk pesanan *${o.id}* (${o.customer}).`)}`;
-
             return `
-                <div class="p-4 sm:p-5 rounded-2xl bg-cream-50 border border-cream-200 space-y-4 text-xs">
-                    <div class="flex flex-wrap items-center justify-between gap-2 border-b border-cream-200 pb-3">
+                <div class="p-4 rounded-2xl bg-cream-50 border border-cream-200 space-y-4">
+                    <div class="flex items-center justify-between border-b border-cream-200 pb-3">
                         <div>
-                            <span class="text-[10px] font-bold uppercase tracking-wider text-stone-400 block">${o.type}</span>
-                            <strong class="font-serif text-xl text-brand-primary">${o.id}</strong>
+                            <span class="text-[10px] font-bold uppercase tracking-wider text-gold-700">${o.type}</span>
+                            <h4 class="font-serif text-xl font-bold text-brand-primary">#${o.id}</h4>
                         </div>
-                        <span class="px-3 py-1 rounded-full bg-brand-primary text-brand-accent font-bold text-[11px]">${o.status}</span>
+                        <span class="px-3 py-1 rounded-full text-[11px] font-bold bg-brand-primary text-brand-accent">${o.status}</span>
                     </div>
 
-                    <!-- 4-Step Visual Timeline -->
-                    <div class="space-y-3 pl-1">
-                        ${steps.map(st => {
-                            const done = currentStep >= st.step;
-                            const active = currentStep === st.step;
-                            return `
-                                <div class="flex items-start gap-3">
-                                    <div class="w-6 h-6 rounded-full flex items-center justify-center shrink-0 text-[10px] font-bold ${done ? 'bg-emerald-700 text-white' : 'bg-cream-200 text-stone-400'} ${active ? 'ring-4 ring-brand-accent/30' : ''}">
-                                        ${done ? '<i class="fa-solid fa-check"></i>' : st.step}
-                                    </div>
-                                    <div>
-                                        <p class="font-bold ${done ? 'text-brand-primary' : 'text-stone-400'}">${st.label}</p>
-                                        <p class="text-[11px] ${done ? 'text-stone-600' : 'text-stone-400'}">${st.desc}</p>
-                                    </div>
-                                </div>
-                            `;
-                        }).join('')}
+                    <div class="grid grid-cols-4 gap-1.5 text-center">
+                        ${steps.map(s => `
+                            <div class="space-y-1">
+                                <div class="h-1.5 rounded-full ${step >= s.num ? 'bg-emerald-600' : 'bg-cream-300'}"></div>
+                                <span class="text-[10px] block leading-tight ${step >= s.num ? 'font-bold text-brand-primary' : 'text-stone-400'}">${s.label}</span>
+                            </div>
+                        `).join('')}
                     </div>
 
-                    <div class="bg-white p-3 rounded-xl border border-cream-200 space-y-1.5 text-[11px] text-stone-600">
-                        <p><strong>Pemesan:</strong> ${o.customer}</p>
-                        <p><strong>Tujuan & Jadwal:</strong> ${o.recipient}</p>
+                    ${o.trackingInfo ? `
+                        <div class="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">
+                            <span class="font-bold block"><i class="fa-solid fa-truck mr-1"></i> Info Kurir & Resi:</span>
+                            <span>${o.trackingInfo}</span>
+                        </div>
+                    ` : ''}
+
+                    <div class="text-xs space-y-1 text-stone-600">
+                        <p><strong>Penerima:</strong> ${o.recipient}</p>
                         <p><strong>Paket:</strong> ${o.items}</p>
-                        ${o.trackingInfo ? `<p class="text-emerald-800 font-semibold"><i class="fa-solid fa-truck mr-1"></i> Info Resi / Kurir: ${o.trackingInfo}</p>` : ''}
                     </div>
-
-                    <a href="${askWaUrl}" target="_blank" class="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-2 transition-all">
-                        <i class="fa-brands fa-whatsapp text-sm"></i>
-                        <span>Hubungi Concierge Mengenai Pesanan Ini</span>
-                    </a>
                 </div>
             `;
         }
 
         /**
-         * 6. B2B & CORPORATE QUOTATION SUBMISSION
-         */
-        function submitB2BQuotation(e) {
-            e.preventDefault();
-            const pic = document.getElementById('b2b-pic').value.trim();
-            const company = document.getElementById('b2b-company').value.trim();
-            const wa = document.getElementById('b2b-wa').value.trim();
-            const qty = document.getElementById('b2b-qty').value;
-            const budget = document.getElementById('b2b-budget').value;
-            const date = document.getElementById('b2b-date').value;
-            const notes = document.getElementById('b2b-notes').value.trim();
-
-            const leadCode = 'B2B-' + Math.floor(1000 + Math.random() * 9000);
-            const b2bOrderRecord = {
-                id: leadCode,
-                type: 'Corporate Quotation (B2B)',
-                status: 'Penawaran Baru',
-                date: new Date().toLocaleString('id-ID'),
-                customer: `${pic} — ${company} (${wa})`,
-                recipient: `Target Kirim: ${date}`,
-                total: 0,
-                payment: 'Invoice Corporate / B2B',
-                items: `${qty} | Budget: ${budget}`,
-                greetingCard: notes || '-',
-                trackingInfo: ''
-            };
-            state.orders.unshift(b2bOrderRecord);
-            persistState();
-            pushOrderToGoogleSheets(b2bOrderRecord);
-
-            const waMessage = `*REQUEST QUOTATION CORPORATE — ${state.settings.brandName.toUpperCase()}*
-Kode Inquiry: *${leadCode}*
---------------------------------
-• Nama PIC: ${pic}
-• Perusahaan: *${company}*
-• No. WhatsApp: ${wa}
-• Estimasi Kuantitas: *${qty}*
-• Estimasi Budget/Box: ${budget}
-• Target Pengiriman: ${date}
-• Catatan Khusus: ${notes || '-'}
---------------------------------
-Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasih!`;
-
-            window.open(`https://wa.me/${state.settings.waNumber}?text=${encodeURIComponent(waMessage)}`, '_blank');
-            e.target.reset();
-            showToast('Permintaan penawaran B2B diarahkan ke WhatsApp Concierge!');
-        }
-
-        /**
-         * 7. PRIVATE ADMIN AUTHENTICATION & COMPLETE DASHBOARD CONTROLS
+         * 7. PRIVATE ADMIN DASHBOARD CONTROLS
          */
         function openAdminAuth() {
+            const modal = document.getElementById('admin-auth-modal');
             document.getElementById('admin-pin-input').value = '';
             document.getElementById('admin-auth-error').classList.add('hidden');
-            const modal = document.getElementById('admin-auth-modal');
             modal.classList.remove('hidden');
             modal.classList.add('flex');
-            setTimeout(() => document.getElementById('admin-pin-input').focus(), 100);
         }
 
         function closeAdminAuth() {
@@ -2481,23 +2402,22 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             const inputPin = document.getElementById('admin-pin-input').value.trim();
             if (inputPin === state.settings.adminPin) {
                 closeAdminAuth();
+                persistState(true, {
+                    activity: 'Login Admin Dashboard',
+                    detail: 'Otorisasi PIN berhasil masuk ke Owner Control Center'
+                });
                 openAdminDashboard();
             } else {
                 document.getElementById('admin-auth-error').classList.remove('hidden');
             }
         }
 
-        document.getElementById('admin-pin-input')?.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') verifyAdminPin();
-        });
-
         function openAdminDashboard() {
+            populateAdminForms();
             renderAdminProductsTable();
-            renderAdminBuilderManagers();
-            renderAdminContentEditors();
+            renderAdminBuilderLists();
             renderAdminOrders();
-            loadAdminSettingsFields();
-            updateCloudSyncBadge(state.settings.gasUrl ? 'synced' : 'idle', state.settings.gasUrl ? 'Cloud Auto-Sync Aktif' : 'Mode Lokal (Belum Connect Sheets)');
+            renderAdminLogs();
             document.getElementById('admin-dashboard-modal').classList.remove('hidden');
         }
 
@@ -2507,60 +2427,99 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
 
         function switchAdminTab(tabName) {
             document.querySelectorAll('.admin-tab-panel').forEach(p => p.classList.add('hidden'));
-            document.getElementById(`admin-tab-${tabName}`).classList.remove('hidden');
+            document.getElementById('admin-tab-' + tabName)?.classList.remove('hidden');
 
             document.querySelectorAll('.admin-tab-btn').forEach(btn => {
                 if (btn.dataset.admintab === tabName) {
-                    btn.className = 'admin-tab-btn py-3.5 text-xs sm:text-sm font-bold border-b-2 border-brand-primary text-brand-primary shrink-0';
+                    btn.classList.add('border-brand-primary', 'text-brand-primary', 'font-bold');
+                    btn.classList.remove('border-transparent', 'text-stone-500');
                 } else {
-                    btn.className = 'admin-tab-btn py-3.5 text-xs sm:text-sm font-medium border-b-2 border-transparent text-stone-500 hover:text-brand-primary shrink-0';
+                    btn.classList.remove('border-brand-primary', 'text-brand-primary', 'font-bold');
+                    btn.classList.add('border-transparent', 'text-stone-500');
                 }
             });
         }
 
-        // HD Image Resizer / Optimizer (Prevents localStorage quota overflow while keeping crisp HD quality)
-        function compressImageToHD(file, maxWidth = 1000, quality = 0.85) {
-            return new Promise((resolve) => {
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const canvas = document.createElement('canvas');
-                        let width = img.width;
-                        let height = img.height;
-                        if (width > maxWidth) {
-                            height = Math.round((height * maxWidth) / width);
-                            width = maxWidth;
-                        }
-                        canvas.width = width;
-                        canvas.height = height;
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, width, height);
-                        resolve(canvas.toDataURL('image/webp', quality));
-                    };
-                    img.src = e.target.result;
+        function populateAdminForms() {
+            const s = state.settings;
+            document.getElementById('adm-hero-img-preview').src = s.heroImage;
+            document.getElementById('adm-hero-img-url').value = s.heroImage;
+            document.getElementById('adm-hero-badge').value = s.heroBadge;
+            document.getElementById('adm-hero-rating').value = s.heroRating;
+            document.getElementById('adm-hero-title').value = s.heroTitle;
+            document.getElementById('adm-hero-subtitle').value = s.heroSubtitle;
+            document.getElementById('adm-hero-cta1').value = s.heroCta1;
+            document.getElementById('adm-hero-cta2').value = s.heroCta2;
+            document.getElementById('adm-hero-card-title').value = s.heroCardTitle;
+            document.getElementById('adm-hero-card-sub').value = s.heroCardSub;
+
+            document.getElementById('adm-banner-text').value = s.bannerText;
+            document.getElementById('adm-brand-name').value = s.brandName;
+
+            document.getElementById('adm-set-wa').value = s.waNumber;
+            document.getElementById('adm-set-pin').value = s.adminPin;
+            document.getElementById('adm-set-address').value = s.address;
+            document.getElementById('adm-set-seo-title').value = s.seoTitle;
+            document.getElementById('adm-set-seo-desc').value = s.seoDesc;
+            document.getElementById('adm-set-gas-url').value = s.gasUrl || '';
+
+            const pay = s.payment || {};
+            document.getElementById('adm-pay-bank1-name').value = pay.bank1Name || '';
+            document.getElementById('adm-pay-bank1-num').value = pay.bank1Number || '';
+            document.getElementById('adm-pay-bank1-holder').value = pay.bank1Holder || '';
+            document.getElementById('adm-pay-bank2-name').value = pay.bank2Name || '';
+            document.getElementById('adm-pay-bank2-num').value = pay.bank2Number || '';
+            document.getElementById('adm-pay-ewallet').value = pay.ewalletInfo || '';
+            document.getElementById('adm-pay-qris-url').value = pay.qrisImage || '';
+            if (pay.qrisImage) document.getElementById('adm-qris-preview').src = pay.qrisImage;
+
+            const trustEditor = document.getElementById('admin-trust-editor');
+            if (trustEditor) {
+                trustEditor.innerHTML = state.trustSignals.map((t, idx) => `
+                    <div class="p-3.5 rounded-xl bg-cream-50 border border-cream-200 space-y-2">
+                        <span class="font-bold text-brand-primary block">Pilar Keunggulan #${idx + 1}</span>
+                        <input type="text" id="adm-trust-title-${idx}" value="${t.title}" class="w-full px-3 py-1.5 bg-white border border-cream-300 rounded-lg">
+                        <input type="text" id="adm-trust-desc-${idx}" value="${t.desc}" class="w-full px-3 py-1.5 bg-white border border-cream-300 rounded-lg">
+                    </div>
+                `).join('');
+            }
+
+            renderAdminTestimonialsList();
+        }
+
+        // Image Optimization Helper (Canvas Compression)
+        function compressImageFile(file, maxWidth, callback) {
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                const img = new Image();
+                img.onload = function() {
+                    const scale = Math.min(1, maxWidth / img.width);
+                    const canvas = document.createElement('canvas');
+                    canvas.width = Math.round(img.width * scale);
+                    canvas.height = Math.round(img.height * scale);
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                    callback(canvas.toDataURL('image/jpeg', 0.82));
                 };
-                reader.readAsDataURL(file);
+                img.src = evt.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function handleProductImageUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            compressImageFile(file, 800, dataUrl => {
+                document.getElementById('adm-prod-img-url').value = dataUrl;
+                document.getElementById('adm-prod-preview').src = dataUrl;
             });
         }
 
-        let tempUploadedProductImg = '';
-
         function updateAdminProductPreviewStyle() {
-            const preview = document.getElementById('adm-prod-preview');
+            const prev = document.getElementById('adm-prod-preview');
             const fit = document.getElementById('adm-prod-fit').value;
             const pos = document.getElementById('adm-prod-pos').value;
-            preview.className = `w-full h-full transition-all ${fit === 'contain' ? 'object-contain p-1' : 'object-cover'} ${pos}`;
-        }
-
-        async function handleProductImageUpload(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-            const hdDataUrl = await compressImageToHD(file, 960, 0.86);
-            tempUploadedProductImg = hdDataUrl;
-            document.getElementById('adm-prod-preview').src = hdDataUrl;
-            updateAdminProductPreviewStyle();
-            showToast('Foto produk HD siap disimpan!');
+            prev.className = `w-full h-full ${fit === 'contain' ? 'object-contain p-1' : 'object-cover'} ${pos} transition-all`;
         }
 
         function saveAdminProduct(e) {
@@ -2568,28 +2527,18 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             const id = document.getElementById('adm-prod-id').value;
             const name = document.getElementById('adm-prod-name').value.trim();
             const category = document.getElementById('adm-prod-cat').value;
-            const price = Number(document.getElementById('adm-prod-price').value);
+            const price = Number(document.getElementById('adm-prod-price').value || 0);
             const badge = document.getElementById('adm-prod-badge').value;
-            const urlInput = document.getElementById('adm-prod-img-url').value.trim();
+            const finalImage = document.getElementById('adm-prod-img-url').value.trim() || 'https://placehold.co/800x600/132A22/D4AF37?text=Crave+Parcel';
             const itemsRaw = document.getElementById('adm-prod-items').value.split(',').map(s => s.trim()).filter(Boolean);
             const description = document.getElementById('adm-prod-desc').value.trim();
             const imageFit = document.getElementById('adm-prod-fit').value;
             const imagePos = document.getElementById('adm-prod-pos').value;
 
-            const finalImage = tempUploadedProductImg || urlInput || 'https://images.unsplash.com/photo-1549465220-1a8b9238cd48?auto=format&fit=crop&w=900&q=85';
-
             if (id) {
                 const idx = state.products.findIndex(p => p.id === id);
                 if (idx !== -1) {
-                    state.products[idx] = {
-                        ...state.products[idx],
-                        name, category, price, badge,
-                        image: (tempUploadedProductImg || urlInput) ? finalImage : state.products[idx].image,
-                        imageFit,
-                        imagePos,
-                        items: itemsRaw,
-                        description: description || state.products[idx].description
-                    };
+                    state.products[idx] = { ...state.products[idx], name, category, price, badge, image: finalImage, imageFit, imagePos, items: itemsRaw, description };
                 }
             } else {
                 state.products.unshift({
@@ -2603,15 +2552,18 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
                 });
             }
 
-            persistState(true);
-            renderCatalog();
-            renderAdminProductsTable();
+            persistState(true, {
+                activity: id ? 'Edit Produk Katalog' : 'Tambah Produk Katalog',
+                detail: `${name} (${formatRp(price)})`
+            });
             resetAdminProductForm();
-            showToast('Katalog produk & pengaturan frame berhasil disimpan & disinkronkan!');
+            renderAdminProductsTable();
+            renderCatalog();
+            showToast('Produk berhasil disimpan ke katalog!');
         }
 
         function editAdminProduct(id) {
-            const p = state.products.find(item => item.id === id);
+            const p = state.products.find(x => x.id === id);
             if (!p) return;
             document.getElementById('admin-prod-form-title').textContent = 'Edit Produk: ' + p.name;
             document.getElementById('adm-prod-id').value = p.id;
@@ -2619,90 +2571,94 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             document.getElementById('adm-prod-cat').value = p.category;
             document.getElementById('adm-prod-price').value = p.price;
             document.getElementById('adm-prod-badge').value = p.badge || '';
-            document.getElementById('adm-prod-items').value = p.items.join(', ');
+            document.getElementById('adm-prod-img-url').value = p.image;
+            document.getElementById('adm-prod-preview').src = p.image;
+            document.getElementById('adm-prod-items').value = (p.items || []).join(', ');
             document.getElementById('adm-prod-desc').value = p.description || '';
             document.getElementById('adm-prod-fit').value = p.imageFit || 'cover';
             document.getElementById('adm-prod-pos').value = p.imagePos || 'object-center';
-            document.getElementById('adm-prod-preview').src = p.image;
             updateAdminProductPreviewStyle();
-            tempUploadedProductImg = '';
         }
 
         function deleteAdminProduct(id) {
+            const target = state.products.find(p => p.id === id);
             state.products = state.products.filter(p => p.id !== id);
-            persistState(true);
-            renderCatalog();
+            persistState(true, {
+                activity: 'Hapus Produk Katalog',
+                detail: target ? target.name : id
+            });
             renderAdminProductsTable();
-            showToast('Produk dihapus & disinkronkan ke cloud.');
+            renderCatalog();
+            showToast('Produk dihapus dari katalog.');
         }
 
         function resetAdminProductForm() {
-            document.getElementById('admin-prod-form').reset();
-            document.getElementById('adm-prod-id').value = '';
-            document.getElementById('adm-prod-fit').value = 'cover';
-            document.getElementById('adm-prod-pos').value = 'object-center';
             document.getElementById('admin-prod-form-title').textContent = 'Tambah Produk Hampers Baru';
+            document.getElementById('admin-product-form').reset();
+            document.getElementById('adm-prod-id').value = '';
             document.getElementById('adm-prod-preview').src = 'https://placehold.co/120x90/EFE7D6/132A22?text=Preview+4:3';
-            updateAdminProductPreviewStyle();
-            tempUploadedProductImg = '';
         }
 
         function renderAdminProductsTable() {
-            document.getElementById('adm-total-products').textContent = `${state.products.length} Produk`;
-            document.getElementById('admin-products-tbody').innerHTML = state.products.map(p => `
+            const tbody = document.getElementById('admin-products-tbody');
+            const totalEl = document.getElementById('adm-total-products');
+            if (totalEl) totalEl.textContent = `${state.products.length} Produk`;
+            if (!tbody) return;
+
+            tbody.innerHTML = state.products.map(p => `
                 <tr>
-                    <td class="py-2.5 px-4"><img src="${p.image}" class="w-12 h-10 object-cover rounded-lg"></td>
+                    <td class="py-2.5 px-4"><img src="${p.image}" class="w-12 h-9 rounded-lg object-cover bg-cream-100"></td>
                     <td class="py-2.5 px-4 font-bold text-brand-primary">${p.name}</td>
                     <td class="py-2.5 px-4">${p.category}</td>
                     <td class="py-2.5 px-4 font-semibold">${formatRp(p.price)}</td>
                     <td class="py-2.5 px-4 text-right space-x-2">
-                        <button onclick="editAdminProduct('${p.id}')" class="px-2.5 py-1 rounded bg-cream-200 text-brand-primary font-semibold">Edit</button>
-                        <button onclick="deleteAdminProduct('${p.id}')" class="px-2.5 py-1 rounded bg-rose-100 text-rose-700 font-semibold">Hapus</button>
+                        <button onclick="editAdminProduct('${p.id}')" class="text-brand-primary font-bold hover:underline">Edit</button>
+                        <button onclick="deleteAdminProduct('${p.id}')" class="text-rose-600 font-bold hover:underline">Hapus</button>
                     </td>
                 </tr>
             `).join('');
         }
 
-        // TAB 2: Builder Boxes & Fillings Management
-        function renderAdminBuilderManagers() {
-            const boxesList = document.getElementById('admin-builder-boxes-list');
-            boxesList.innerHTML = state.builderBoxes.map(b => `
-                <div class="p-3 rounded-xl bg-cream-50 border border-cream-200 flex items-center justify-between gap-2">
-                    <div>
-                        <p class="font-bold text-brand-primary">${b.name} — <span class="text-gold-700">${formatRp(b.price)}</span></p>
-                        <p class="text-[11px] text-stone-500">Kapasitas: ${b.capacity} slot • ${b.desc}</p>
-                    </div>
-                    <div class="space-x-1.5 shrink-0">
-                        <button onclick="editBuilderBox('${b.id}')" class="px-2.5 py-1 rounded bg-cream-200 text-brand-primary font-semibold">Edit</button>
-                        <button onclick="deleteBuilderBox('${b.id}')" class="px-2.5 py-1 rounded bg-rose-100 text-rose-700 font-semibold">Hapus</button>
-                    </div>
-                </div>
-            `).join('');
-
-            const itemsList = document.getElementById('admin-builder-items-list');
-            itemsList.innerHTML = state.builderItems.map(i => `
-                <div class="p-3 rounded-xl bg-cream-50 border border-cream-200 flex items-center justify-between gap-2">
-                    <div class="flex items-center gap-2.5">
-                        <i class="fa-solid ${i.icon} text-brand-primary"></i>
+        // Builder Admin CRUD
+        function renderAdminBuilderLists() {
+            const boxList = document.getElementById('admin-builder-boxes-list');
+            const itemList = document.getElementById('admin-builder-items-list');
+            if (boxList) {
+                boxList.innerHTML = state.builderBoxes.map(b => `
+                    <div class="p-2.5 rounded-xl bg-cream-50 border border-cream-200 flex items-center justify-between">
                         <div>
-                            <p class="font-bold text-brand-primary">${i.name}</p>
-                            <p class="text-[11px] text-stone-500">${formatRp(i.price)} • ${i.category}</p>
+                            <span class="font-bold text-brand-primary">${b.name}</span> (${formatRp(b.price)} • ${b.capacity} slot)
+                            <p class="text-[11px] text-stone-500">${b.desc}</p>
+                        </div>
+                        <div class="space-x-2 shrink-0">
+                            <button onclick="editBuilderBox('${b.id}')" class="text-brand-primary font-bold">Edit</button>
+                            <button onclick="deleteBuilderBox('${b.id}')" class="text-rose-600 font-bold">Hapus</button>
                         </div>
                     </div>
-                    <div class="space-x-1.5 shrink-0">
-                        <button onclick="editBuilderItem('${i.id}')" class="px-2.5 py-1 rounded bg-cream-200 text-brand-primary font-semibold">Edit</button>
-                        <button onclick="deleteBuilderItem('${i.id}')" class="px-2.5 py-1 rounded bg-rose-100 text-rose-700 font-semibold">Hapus</button>
+                `).join('');
+            }
+            if (itemList) {
+                itemList.innerHTML = state.builderItems.map(i => `
+                    <div class="p-2.5 rounded-xl bg-cream-50 border border-cream-200 flex items-center justify-between">
+                        <div>
+                            <span class="font-bold text-brand-primary">${i.name}</span> (${formatRp(i.price)})
+                            <span class="text-[10px] text-stone-500 block">${i.category}</span>
+                        </div>
+                        <div class="space-x-2 shrink-0">
+                            <button onclick="editBuilderItem('${i.id}')" class="text-brand-primary font-bold">Edit</button>
+                            <button onclick="deleteBuilderItem('${i.id}')" class="text-rose-600 font-bold">Hapus</button>
+                        </div>
                     </div>
-                </div>
-            `).join('');
+                `).join('');
+            }
         }
 
         function saveBuilderBox(e) {
             e.preventDefault();
             const id = document.getElementById('adm-box-id').value;
             const name = document.getElementById('adm-box-name').value.trim();
-            const price = Number(document.getElementById('adm-box-price').value);
-            const capacity = Number(document.getElementById('adm-box-cap').value);
+            const price = Number(document.getElementById('adm-box-price').value || 0);
+            const capacity = Number(document.getElementById('adm-box-cap').value || 4);
             const desc = document.getElementById('adm-box-desc').value.trim();
 
             if (id) {
@@ -2711,11 +2667,15 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             } else {
                 state.builderBoxes.push({ id: 'box-' + Date.now(), name, price, capacity, desc });
             }
-            persistState(true);
-            renderBuilder();
-            renderAdminBuilderManagers();
+
+            persistState(true, {
+                activity: id ? 'Edit Wadah Builder' : 'Tambah Wadah Builder',
+                detail: `${name} (${formatRp(price)})`
+            });
             resetBuilderBoxForm();
-            showToast('Pilihan wadah builder disimpan & disinkronkan!');
+            renderAdminBuilderLists();
+            renderBuilder();
+            showToast('Pilihan wadah builder disimpan!');
         }
 
         function editBuilderBox(id) {
@@ -2729,16 +2689,10 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
         }
 
         function deleteBuilderBox(id) {
-            if (state.builderBoxes.length <= 1) {
-                showToast('Minimal harus ada 1 pilihan wadah.');
-                return;
-            }
             state.builderBoxes = state.builderBoxes.filter(b => b.id !== id);
-            if (state.builder.selectedBoxId === id) state.builder.selectedBoxId = state.builderBoxes[0].id;
-            persistState(true);
+            persistState(true, { activity: 'Hapus Wadah Builder', detail: id });
+            renderAdminBuilderLists();
             renderBuilder();
-            renderAdminBuilderManagers();
-            showToast('Wadah builder dihapus & disinkronkan.');
         }
 
         function resetBuilderBoxForm() {
@@ -2753,7 +2707,7 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             e.preventDefault();
             const id = document.getElementById('adm-bitem-id').value;
             const name = document.getElementById('adm-bitem-name').value.trim();
-            const price = Number(document.getElementById('adm-bitem-price').value);
+            const price = Number(document.getElementById('adm-bitem-price').value || 0);
             const category = document.getElementById('adm-bitem-cat').value.trim();
             const icon = document.getElementById('adm-bitem-icon').value;
 
@@ -2763,30 +2717,32 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             } else {
                 state.builderItems.push({ id: 'bi-' + Date.now(), name, price, category, icon });
             }
-            persistState(true);
-            renderBuilder();
-            renderAdminBuilderManagers();
+
+            persistState(true, {
+                activity: id ? 'Edit Item Isian Builder' : 'Tambah Item Isian Builder',
+                detail: `${name} (${formatRp(price)})`
+            });
             resetBuilderItemForm();
-            showToast('Item isian builder disimpan & disinkronkan!');
+            renderAdminBuilderLists();
+            renderBuilder();
+            showToast('Item isian builder disimpan!');
         }
 
         function editBuilderItem(id) {
-            const i = state.builderItems.find(x => x.id === id);
-            if (!i) return;
-            document.getElementById('adm-bitem-id').value = i.id;
-            document.getElementById('adm-bitem-name').value = i.name;
-            document.getElementById('adm-bitem-price').value = i.price;
-            document.getElementById('adm-bitem-cat').value = i.category;
-            document.getElementById('adm-bitem-icon').value = i.icon;
+            const it = state.builderItems.find(x => x.id === id);
+            if (!it) return;
+            document.getElementById('adm-bitem-id').value = it.id;
+            document.getElementById('adm-bitem-name').value = it.name;
+            document.getElementById('adm-bitem-price').value = it.price;
+            document.getElementById('adm-bitem-cat').value = it.category;
+            document.getElementById('adm-bitem-icon').value = it.icon || 'fa-gift';
         }
 
         function deleteBuilderItem(id) {
             state.builderItems = state.builderItems.filter(i => i.id !== id);
-            delete state.builder.selectedItems[id];
-            persistState(true);
+            persistState(true, { activity: 'Hapus Item Isian Builder', detail: id });
+            renderAdminBuilderLists();
             renderBuilder();
-            renderAdminBuilderManagers();
-            showToast('Item isian builder dihapus & disinkronkan.');
         }
 
         function resetBuilderItemForm() {
@@ -2794,57 +2750,34 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             document.getElementById('adm-bitem-name').value = '';
             document.getElementById('adm-bitem-price').value = '';
             document.getElementById('adm-bitem-cat').value = '';
-            document.getElementById('adm-bitem-icon').value = 'fa-cookie-bite';
         }
 
-        // TAB 3: Hero, Trust Signals & Testimonials Editors
-        function renderAdminContentEditors() {
-            const s = state.settings;
-            document.getElementById('adm-hero-img-preview').src = s.heroImage || 'https://images.unsplash.com/photo-1549465220-1a8b9238cd48?auto=format&fit=crop&w=1000&q=85';
-            document.getElementById('adm-hero-img-url').value = (s.heroImage && !s.heroImage.startsWith('data:')) ? s.heroImage : '';
-            document.getElementById('adm-hero-badge').value = s.heroBadge;
-            document.getElementById('adm-hero-rating').value = s.heroRating;
-            document.getElementById('adm-hero-title').value = s.heroTitle;
-            document.getElementById('adm-hero-subtitle').value = s.heroSubtitle;
-            document.getElementById('adm-hero-cta1').value = s.heroCta1;
-            document.getElementById('adm-hero-cta2').value = s.heroCta2;
-            document.getElementById('adm-hero-card-title').value = s.heroCardTitle;
-            document.getElementById('adm-hero-card-sub').value = s.heroCardSub;
+        // Hero, Trust & Testimonials Editors
+        function handleHeroImageUpload(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            compressImageFile(file, 900, dataUrl => {
+                state.settings.heroImage = dataUrl;
+                document.getElementById('adm-hero-img-preview').src = dataUrl;
+                document.getElementById('adm-hero-img-url').value = dataUrl;
+                applySavedSettingsToUI();
+                persistState(true, { activity: 'Upload Foto Hero HD', detail: 'Foto utama Hero diperbarui' });
+                showToast('Foto Hero HD diperbarui!');
+            });
+        }
 
-            // Trust Signals Editor
-            document.getElementById('admin-trust-editor').innerHTML = state.trustSignals.map((t, idx) => `
-                <div class="p-3.5 rounded-xl bg-cream-50 border border-cream-200 space-y-2">
-                    <span class="font-bold text-brand-primary block">Pilar #${idx + 1}</span>
-                    <input type="text" id="adm-trust-title-${idx}" value="${t.title}" class="w-full px-3 py-1.5 bg-white border border-cream-300 rounded-lg font-semibold">
-                    <input type="text" id="adm-trust-desc-${idx}" value="${t.desc}" class="w-full px-3 py-1.5 bg-white border border-cream-300 rounded-lg">
-                </div>
-            `).join('');
-
-            // Testimonials List
-            document.getElementById('admin-testimonials-list').innerHTML = state.testimonials.map(t => `
-                <div class="p-3.5 rounded-xl bg-cream-50 border border-cream-200 flex flex-col justify-between gap-2">
-                    <div>
-                        <div class="flex justify-between items-center">
-                            <strong class="text-brand-primary">${t.name}</strong>
-                            <span class="px-2 py-0.5 rounded bg-brand-primary/10 text-brand-primary text-[10px] font-bold">${t.tag}</span>
-                        </div>
-                        <span class="text-[11px] text-stone-500 block">${t.role}</span>
-                        <p class="italic text-stone-600 mt-1.5">"${t.quote}"</p>
-                    </div>
-                    <div class="flex justify-end gap-1.5 pt-2 border-t border-cream-200">
-                        <button onclick="editTestimonial('${t.id}')" class="px-2.5 py-1 rounded bg-cream-200 text-brand-primary font-semibold">Edit</button>
-                        <button onclick="deleteTestimonial('${t.id}')" class="px-2.5 py-1 rounded bg-rose-100 text-rose-700 font-semibold">Hapus</button>
-                    </div>
-                </div>
-            `).join('');
+        function resetHeroImage() {
+            const defUrl = 'https://images.unsplash.com/photo-1549465220-1a8b9238cd48?auto=format&fit=crop&w=1000&q=85';
+            state.settings.heroImage = defUrl;
+            document.getElementById('adm-hero-img-preview').src = defUrl;
+            document.getElementById('adm-hero-img-url').value = defUrl;
+            applySavedSettingsToUI();
+            persistState(true, { activity: 'Reset Foto Hero', detail: 'Kembali ke foto default' });
         }
 
         function saveHeroContent() {
-            const urlVal = document.getElementById('adm-hero-img-url').value.trim();
-            if (urlVal) {
-                state.settings.heroImage = urlVal;
-                document.getElementById('adm-hero-img-preview').src = urlVal;
-            }
+            const urlInput = document.getElementById('adm-hero-img-url').value.trim();
+            if (urlInput) state.settings.heroImage = urlInput;
             state.settings.heroBadge = document.getElementById('adm-hero-badge').value.trim();
             state.settings.heroRating = document.getElementById('adm-hero-rating').value.trim();
             state.settings.heroTitle = document.getElementById('adm-hero-title').value.trim();
@@ -2853,30 +2786,45 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             state.settings.heroCta2 = document.getElementById('adm-hero-cta2').value.trim();
             state.settings.heroCardTitle = document.getElementById('adm-hero-card-title').value.trim();
             state.settings.heroCardSub = document.getElementById('adm-hero-card-sub').value.trim();
-            persistState(true);
-            applySavedSettingsToUI();
-            showToast('Konten & foto Hero Section berhasil diperbarui & disinkronkan!');
-        }
 
-        function resetHeroImage() {
-            const defaultHero = 'https://images.unsplash.com/photo-1549465220-1a8b9238cd48?auto=format&fit=crop&w=1000&q=85';
-            state.settings.heroImage = defaultHero;
-            document.getElementById('adm-hero-img-preview').src = defaultHero;
-            document.getElementById('adm-hero-img-url').value = '';
-            persistState(true);
+            persistState(true, {
+                activity: 'Update Konten & Foto Hero',
+                detail: state.settings.heroCardTitle
+            });
             applySavedSettingsToUI();
-            showToast('Foto Hero dikembalikan ke default.');
+            showToast('Konten Hero berhasil diperbarui!');
         }
 
         function saveTrustSignals() {
             state.trustSignals = state.trustSignals.map((t, idx) => ({
                 ...t,
-                title: document.getElementById(`adm-trust-title-${idx}`).value.trim(),
-                desc: document.getElementById(`adm-trust-desc-${idx}`).value.trim()
+                title: document.getElementById(`adm-trust-title-${idx}`).value.trim() || t.title,
+                desc: document.getElementById(`adm-trust-desc-${idx}`).value.trim() || t.desc
             }));
-            persistState(true);
+
+            persistState(true, {
+                activity: 'Update 4 Pilar Keunggulan',
+                detail: 'Teks Trust Bar diperbarui'
+            });
             renderTrustSignals();
-            showToast('4 Pilar Keunggulan berhasil diperbarui & disinkronkan!');
+            showToast('4 Pilar Keunggulan disimpan!');
+        }
+
+        function renderAdminTestimonialsList() {
+            const el = document.getElementById('admin-testimonials-list');
+            if (!el) return;
+            el.innerHTML = state.testimonials.map(t => `
+                <div class="p-3 rounded-xl bg-cream-50 border border-cream-200 flex justify-between gap-2">
+                    <div>
+                        <span class="font-bold text-brand-primary">${t.name}</span> <span class="text-stone-400">(${t.tag})</span>
+                        <p class="text-stone-600 mt-1 line-clamp-2">"${t.quote}"</p>
+                    </div>
+                    <div class="space-x-2 shrink-0">
+                        <button onclick="editTestimonial('${t.id}')" class="text-brand-primary font-bold">Edit</button>
+                        <button onclick="deleteTestimonial('${t.id}')" class="text-rose-600 font-bold">Hapus</button>
+                    </div>
+                </div>
+            `).join('');
         }
 
         function saveTestimonial(e) {
@@ -2893,11 +2841,15 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             } else {
                 state.testimonials.unshift({ id: 't-' + Date.now(), name, role, tag, quote });
             }
-            persistState(true);
-            renderTestimonials();
-            renderAdminContentEditors();
+
+            persistState(true, {
+                activity: id ? 'Edit Testimoni Klien' : 'Tambah Testimoni Klien',
+                detail: name
+            });
             resetTestimonialForm();
-            showToast('Testimoni klien disimpan & disinkronkan!');
+            renderAdminTestimonialsList();
+            renderTestimonials();
+            showToast('Testimoni klien disimpan!');
         }
 
         function editTestimonial(id) {
@@ -2912,10 +2864,9 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
 
         function deleteTestimonial(id) {
             state.testimonials = state.testimonials.filter(t => t.id !== id);
-            persistState(true);
+            persistState(true, { activity: 'Hapus Testimoni Klien', detail: id });
+            renderAdminTestimonialsList();
             renderTestimonials();
-            renderAdminContentEditors();
-            showToast('Testimoni dihapus & disinkronkan.');
         }
 
         function resetTestimonialForm() {
@@ -2925,176 +2876,166 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             document.getElementById('adm-testi-quote').value = '';
         }
 
-        // Theme & Brand Logo HD Controls
+        // Theme & Brand Identity
         function applyEventTheme(themeKey) {
+            const themeObj = EVENT_THEMES[themeKey] || EVENT_THEMES.default;
             state.settings.theme = themeKey;
-            if (EVENT_THEMES[themeKey]) {
-                state.settings.bannerText = EVENT_THEMES[themeKey].banner;
-                document.getElementById('adm-banner-text').value = state.settings.bannerText;
-            }
-            persistState(true);
+            state.settings.bannerText = themeObj.banner;
+            document.getElementById('adm-banner-text').value = themeObj.banner;
             applySavedSettingsToUI();
-            showToast(`Tema event "${themeKey.toUpperCase()}" diaktifkan & disinkronkan!`);
+            persistState(true, { activity: 'Ganti Tema Event', detail: 'Tema aktif: ' + themeKey.toUpperCase() });
+            showToast('Tema event berhasil diterapkan!');
         }
 
         function saveBannerText() {
             state.settings.bannerText = document.getElementById('adm-banner-text').value.trim();
-            persistState(true);
             applySavedSettingsToUI();
-            showToast('Teks pengumuman diperbarui & disinkronkan!');
+            persistState(true, { activity: 'Edit Banner Pengumuman', detail: state.settings.bannerText });
+            showToast('Teks pengumuman diperbarui!');
         }
 
-        async function handleLogoUpload(event) {
-            const file = event.target.files[0];
+        function handleLogoUpload(e) {
+            const file = e.target.files[0];
             if (!file) return;
-            const hdLogo = await compressImageToHD(file, 400, 0.92);
-            state.settings.logoDataUrl = hdLogo;
-            persistState(true);
-            applySavedSettingsToUI();
-            showToast('Logo HD berhasil diperbarui!');
-        }
-
-        function removeCustomLogo() {
-            state.settings.logoDataUrl = '';
-            persistState(true);
-            applySavedSettingsToUI();
-            showToast('Logo kembali ke ikon default.');
+            compressImageFile(file, 400, dataUrl => {
+                state.settings.logoDataUrl = dataUrl;
+                applySavedSettingsToUI();
+                persistState(true, { activity: 'Upload Logo Brand HD', detail: 'Logo brand diperbarui' });
+                showToast('Logo brand HD berhasil diunggah!');
+            });
         }
 
         function saveBrandIdentity() {
             const name = document.getElementById('adm-brand-name').value.trim();
-            if (name) {
-                state.settings.brandName = name;
-                persistState(true);
-                applySavedSettingsToUI();
-                showToast('Identitas brand disimpan & disinkronkan!');
-            }
-        }
-
-        async function handleHeroImageUpload(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-            const hdHero = await compressImageToHD(file, 1200, 0.88);
-            state.settings.heroImage = hdHero;
-            const prevEl = document.getElementById('adm-hero-img-preview');
-            if (prevEl) prevEl.src = hdHero;
-            persistState(true);
+            if (name) state.settings.brandName = name;
             applySavedSettingsToUI();
-            showToast('Foto utama Hero HD berhasil diperbarui!');
+            persistState(true, { activity: 'Update Nama Brand', detail: state.settings.brandName });
+            showToast('Identitas brand disimpan!');
         }
 
-        // Admin Orders Log
+        function removeCustomLogo() {
+            state.settings.logoDataUrl = '';
+            applySavedSettingsToUI();
+            persistState(true, { activity: 'Hapus Logo Custom', detail: 'Kembali ke ikon default' });
+        }
+
+        // Orders & Logs in Admin
         function renderAdminOrders() {
-            document.getElementById('admin-order-count').textContent = state.orders.length;
-            const container = document.getElementById('admin-orders-list');
+            const countEl = document.getElementById('admin-order-count');
+            if (countEl) countEl.textContent = state.orders.length;
+
+            const list = document.getElementById('admin-orders-list');
+            if (!list) return;
+
             if (state.orders.length === 0) {
-                container.innerHTML = '<p class="text-stone-400 italic">Belum ada transaksi masuk.</p>';
+                list.innerHTML = '<p class="text-stone-400 italic">Belum ada transaksi tercatat.</p>';
                 return;
             }
 
-            container.innerHTML = state.orders.map((o, idx) => `
-                <div class="p-4 rounded-xl bg-cream-50 border border-cream-200 space-y-2">
-                    <div class="flex flex-wrap justify-between items-center gap-2 font-bold text-brand-primary">
-                        <span>${o.id} — ${o.type}</span>
-                        <div class="flex items-center gap-2">
-                            <select onchange="updateOrderStatus(${idx}, this.value)" class="px-2.5 py-1 rounded-lg bg-white border border-cream-300 text-[11px] font-semibold text-brand-primary">
-                                <option value="Baru / Menunggu Bayar" ${o.status === 'Baru / Menunggu Bayar' ? 'selected' : ''}>Baru / Menunggu Bayar</option>
-                                <option value="Lunas / Diproses" ${o.status === 'Lunas / Diproses' ? 'selected' : ''}>Lunas / Diproses</option>
-                                <option value="Dalam Pengiriman" ${o.status === 'Dalam Pengiriman' ? 'selected' : ''}>Dalam Pengiriman</option>
-                                <option value="Selesai" ${o.status === 'Selesai' ? 'selected' : ''}>Selesai</option>
-                            </select>
-                            <span class="text-gold-700 font-normal">${o.date}</span>
+            list.innerHTML = state.orders.map((o, idx) => `
+                <div class="p-4 rounded-2xl bg-cream-50 border border-cream-200 space-y-2.5">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                            <span class="font-bold text-brand-primary text-sm">#${o.id}</span>
+                            <span class="ml-2 px-2 py-0.5 rounded bg-brand-primary/10 text-brand-primary text-[10px] font-bold">${o.type}</span>
+                            <span class="block text-[11px] text-stone-400">${o.date} • ${o.customer}</span>
                         </div>
+                        <span class="font-bold text-gold-700 text-sm">${o.total ? formatRp(o.total) : 'Quotation B2B'}</span>
                     </div>
-                    <p><strong>Pemesan:</strong> ${o.customer}</p>
-                    <p><strong>Tujuan / Jadwal:</strong> ${o.recipient}</p>
-                    <p><strong>Item:</strong> ${o.items}</p>
-                    <p><strong>Kartu / Catatan:</strong> ${o.greetingCard}</p>
-                    ${o.total ? `<p class="font-bold text-emerald-800">Total: ${formatRp(o.total)} (${o.payment})</p>` : ''}
-                    <div class="pt-2 border-t border-cream-200 flex flex-col sm:flex-row gap-2 items-center">
-                        <input type="text" id="adm-resi-${idx}" value="${o.trackingInfo || ''}" placeholder="Input Kurir & No. Resi (cth: JNE Express - 0129381293)" class="w-full flex-1 px-3 py-1.5 bg-white border border-cream-300 rounded-lg text-[11px]">
-                        <button type="button" onclick="saveOrderTrackingInfo(${idx})" class="w-full sm:w-auto px-3 py-1.5 rounded-lg bg-brand-primary text-white font-semibold text-[11px] shrink-0">Simpan Resi</button>
+                    <p class="text-stone-700"><strong>Item:</strong> ${o.items}</p>
+                    <p class="text-stone-600"><strong>Penerima:</strong> ${o.recipient}</p>
+                    <div class="pt-2 border-t border-cream-200 flex flex-col sm:flex-row gap-2">
+                        <select id="ord-status-${idx}" class="px-3 py-1.5 bg-white border border-cream-300 rounded-lg font-semibold">
+                            ${['Baru / Menunggu Bayar', 'Lunas & Perakitan Hampers', 'Dalam Pengiriman', 'Pesanan Selesai'].map(st =>
+                                `<option value="${st}" ${o.status === st ? 'selected' : ''}>${st}</option>`
+                            ).join('')}
+                        </select>
+                        <input type="text" id="ord-resi-${idx}" value="${o.trackingInfo || ''}" placeholder="Input Kurir & No. Resi (cth: JNE Cargo - 01293812)" class="flex-1 px-3 py-1.5 bg-white border border-cream-300 rounded-lg">
+                        <button onclick="updateAdminOrder(${idx})" class="px-4 py-1.5 rounded-lg bg-brand-primary text-white font-bold shrink-0">Update Status</button>
                     </div>
                 </div>
             `).join('');
         }
 
-        function updateOrderStatus(idx, newStatus) {
-            if (!state.orders[idx]) return;
-            state.orders[idx].status = newStatus;
-            const resiInput = document.getElementById(`adm-resi-${idx}`);
-            const trackingInfo = resiInput ? resiInput.value.trim() : (state.orders[idx].trackingInfo || '');
-            state.orders[idx].trackingInfo = trackingInfo;
-            persistState();
-            syncOrderStatusToGoogleSheets(state.orders[idx].id, newStatus, trackingInfo);
-            showToast(`Status ${state.orders[idx].id} diubah menjadi "${newStatus}".`);
+        function updateAdminOrder(idx) {
+            const order = state.orders[idx];
+            if (!order) return;
+            const newStatus = document.getElementById(`ord-status-${idx}`).value;
+            const newResi = document.getElementById(`ord-resi-${idx}`).value.trim();
+            order.status = newStatus;
+            order.trackingInfo = newResi;
+
+            persistState(false, {
+                activity: 'Update Status / Resi Pesanan',
+                detail: `Invoice ${order.id} -> ${newStatus}`
+            });
+            renderAdminOrders();
+
+            if (state.settings.gasUrl) {
+                syncOrderStatusToGoogleSheets(order.id, newStatus, newResi);
+            }
+            showToast(`Status pesanan #${order.id} diperbarui!`);
         }
 
-        function saveOrderTrackingInfo(idx) {
-            if (!state.orders[idx]) return;
-            const resiInput = document.getElementById(`adm-resi-${idx}`);
-            const trackingInfo = resiInput ? resiInput.value.trim() : '';
-            state.orders[idx].trackingInfo = trackingInfo;
-            persistState();
-            syncOrderStatusToGoogleSheets(state.orders[idx].id, state.orders[idx].status, trackingInfo);
-            showToast(`Info resi untuk ${state.orders[idx].id} disimpan!`);
+        function renderAdminLogs() {
+            const countEl = document.getElementById('admin-log-count');
+            if (countEl) countEl.textContent = state.adminLogs.length;
+
+            const listEl = document.getElementById('admin-activity-logs-list');
+            if (!listEl) return;
+
+            if (state.adminLogs.length === 0) {
+                listEl.innerHTML = '<p class="text-stone-400 italic">Belum ada aktivitas admin tercatat.</p>';
+                return;
+            }
+
+            listEl.innerHTML = state.adminLogs.map(log => `
+                <div class="p-3 rounded-xl bg-cream-50 border border-cream-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
+                        <span class="font-bold text-brand-primary">${log.activity}</span>
+                        <p class="text-stone-600 mt-0.5">${log.detail}</p>
+                    </div>
+                    <div class="text-left sm:text-right shrink-0 text-[11px] text-stone-400">
+                        <span class="block font-medium text-gold-700">${log.time}</span>
+                        <span>Host: ${log.source || 'Web'}</span>
+                    </div>
+                </div>
+            `).join('');
         }
 
         function clearOrderLogs() {
             state.orders = [];
-            persistState();
+            persistState(false);
             renderAdminOrders();
-            showToast('Riwayat pesanan dibersihkan.');
         }
 
-        // Admin Settings
-        function loadAdminSettingsFields() {
-            const s = state.settings;
-            const pay = s.payment || PERMANENT_STORE_CONFIG.payment;
-            document.getElementById('adm-banner-text').value = s.bannerText;
-            document.getElementById('adm-brand-name').value = s.brandName;
-            document.getElementById('adm-set-wa').value = s.waNumber;
-            document.getElementById('adm-set-address').value = s.address;
-            document.getElementById('adm-set-seo-title').value = s.seoTitle;
-            document.getElementById('adm-set-seo-desc').value = s.seoDesc || '';
-            document.getElementById('adm-set-pin').value = s.adminPin;
-            document.getElementById('adm-set-gas-url').value = s.gasUrl || '';
-
-            document.getElementById('adm-pay-bank1-name').value = pay.bank1Name || '';
-            document.getElementById('adm-pay-bank1-num').value = pay.bank1Number || '';
-            document.getElementById('adm-pay-bank1-holder').value = pay.bank1Holder || '';
-            document.getElementById('adm-pay-bank2-name').value = pay.bank2Name || '';
-            document.getElementById('adm-pay-bank2-num').value = pay.bank2Number || '';
-            document.getElementById('adm-pay-ewallet').value = pay.ewalletInfo || '';
-            document.getElementById('adm-pay-qris-url').value = (pay.qrisImage && !pay.qrisImage.startsWith('data:')) ? pay.qrisImage : '';
-            document.getElementById('adm-qris-preview').src = pay.qrisImage || 'https://placehold.co/180x180/132A22/D4AF37?text=QRIS+Owner';
-        }
-
-        async function handleQrisImageUpload(event) {
-            const file = event.target.files[0];
+        // Settings, Payment & Google Sheets Sync
+        function handleQrisImageUpload(e) {
+            const file = e.target.files[0];
             if (!file) return;
-            const optimizedQris = await compressImageToHD(file, 500, 0.9);
-            state.settings.payment.qrisImage = optimizedQris;
-            document.getElementById('adm-qris-preview').src = optimizedQris;
-            persistState();
-            showToast('Gambar QRIS berhasil diunggah!');
+            compressImageFile(file, 500, dataUrl => {
+                state.settings.payment.qrisImage = dataUrl;
+                document.getElementById('adm-pay-qris-url').value = dataUrl;
+                document.getElementById('adm-qris-preview').src = dataUrl;
+                showToast('Gambar QRIS berhasil diunggah! Klik Simpan Pengaturan.');
+            });
         }
 
         function clearQrisImage() {
             state.settings.payment.qrisImage = '';
             document.getElementById('adm-pay-qris-url').value = '';
             document.getElementById('adm-qris-preview').src = 'https://placehold.co/180x180/132A22/D4AF37?text=QRIS+Owner';
-            persistState();
-            showToast('Gambar QRIS dihapus.');
         }
 
         function saveAdminSettings() {
-            const cleanWa = document.getElementById('adm-set-wa').value.replace(/[^0-9]/g, '');
-            state.settings.waNumber = cleanWa.startsWith('0') ? '62' + cleanWa.slice(1) : (cleanWa || state.settings.waNumber);
+            let waRaw = document.getElementById('adm-set-wa').value.replace(/\D/g, '');
+            if (waRaw.startsWith('0')) waRaw = '62' + waRaw.slice(1);
+            if (waRaw) state.settings.waNumber = waRaw;
+
             state.settings.address = document.getElementById('adm-set-address').value.trim();
             state.settings.seoTitle = document.getElementById('adm-set-seo-title').value.trim();
             state.settings.seoDesc = document.getElementById('adm-set-seo-desc').value.trim();
-            state.settings.gasUrl = document.getElementById('adm-set-gas-url').value.trim();
+            state.settings.gasUrl = document.getElementById('adm-set-gas-url').value.trim() || PERMANENT_GAS_WEB_APP_URL;
 
             const qrisUrlInput = document.getElementById('adm-pay-qris-url').value.trim();
             state.settings.payment = {
@@ -3110,39 +3051,38 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             const newPin = document.getElementById('adm-set-pin').value.trim();
             if (newPin.length >= 4) state.settings.adminPin = newPin;
 
-            persistState();
+            persistState(false, {
+                activity: 'Simpan Pengaturan Toko, SEO & Pembayaran',
+                detail: `WA: +${state.settings.waNumber}`
+            });
             applySavedSettingsToUI();
 
-            // Auto-push ke Google Sheets agar tidak tertimpa saat halaman dibuka ulang
             if (state.settings.gasUrl) {
-                pushAllToGoogleSheets();
+                pushAllToGoogleSheets(true, {
+                    activity: 'Simpan & Sinkron Pengaturan',
+                    detail: 'Konfigurasi WA, SEO & Rekening disinkronkan'
+                });
             } else {
-                showToast('Pengaturan WA, SEO & Pembayaran Owner berhasil disimpan!');
+                showToast('Pengaturan berhasil disimpan secara lokal!');
             }
         }
 
-        /**
-         * 8. GOOGLE SHEETS (Code.gs) 2-WAY SYNC BRIDGE (VERCEL-READY CORS SAFE)
-         */
-        function getActiveGasUrl() {
-            const inputEl = document.getElementById('adm-set-gas-url');
-            const fromInput = inputEl ? inputEl.value.trim() : '';
-            return PERMANENT_GAS_WEB_APP_URL || fromInput || state.settings.gasUrl || '';
-        }
-
-        async function postPayloadToGoogleSheets(payloadObj) {
-            const url = getActiveGasUrl();
+        async function postPayloadToGoogleSheets(payload) {
+            const url = state.settings.gasUrl;
             if (!url) return false;
             try {
+                payload.sourceHost = window.location.hostname || 'Lokal';
                 await fetch(url, {
                     method: 'POST',
                     mode: 'no-cors',
                     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify(payloadObj)
+                    body: JSON.stringify(payload)
                 });
+                updateCloudSyncBadge('synced', 'Tersinkron Otomatis');
                 return true;
             } catch (err) {
-                console.warn('Google Sheets POST sync error:', err);
+                console.error('Google Sheets Sync Error:', err);
+                updateCloudSyncBadge('error', 'Gagal Sinkron');
                 return false;
             }
         }
@@ -3151,98 +3091,97 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             await postPayloadToGoogleSheets({ action: 'createOrder', order: orderObj });
         }
 
-        async function syncOrderStatusToGoogleSheets(orderId, status, trackingInfo = '') {
-            await postPayloadToGoogleSheets({ action: 'updateOrderStatus', orderId, status, trackingInfo });
+        async function syncOrderStatusToGoogleSheets(orderId, status, trackingInfo) {
+            await postPayloadToGoogleSheets({
+                action: 'updateOrderStatus',
+                orderId: orderId,
+                status: status,
+                trackingInfo: trackingInfo
+            });
         }
 
-        async function pushAllToGoogleSheets(notify = true) {
-            const url = getActiveGasUrl();
-            if (!url) {
-                if (notify) showToast('Isi PERMANENT_GAS_WEB_APP_URL di kode atau masukkan URL Web App di kolom bawah.');
+        async function pushAllToGoogleSheets(notify = true, activityMeta = null) {
+            if (!state.settings.gasUrl) {
+                if (notify) showToast('Masukkan URL Web App Google Apps Script terlebih dahulu.');
                 return;
             }
-            state.settings.gasUrl = url;
-            persistState(false);
-            updateCloudSyncBadge('syncing', 'Menyinkronkan ke Sheets...');
-            if (notify) showToast('Menyinkronkan data ke Google Sheets...');
-
+            updateCloudSyncBadge('syncing', 'Menyinkronkan...');
             const ok = await postPayloadToGoogleSheets({
                 action: 'syncAll',
                 products: state.products,
                 orders: state.orders,
                 config: {
+                    settings: state.settings,
                     builderBoxes: state.builderBoxes,
                     builderItems: state.builderItems,
                     trustSignals: state.trustSignals,
-                    testimonials: state.testimonials,
-                    settings: state.settings
-                }
+                    testimonials: state.testimonials
+                },
+                activity: activityMeta ? activityMeta.activity : 'Sinkronisasi Penuh Manual',
+                detail: activityMeta ? activityMeta.detail : 'Seluruh data dikirim ke Google Sheets'
             });
-
-            autoSyncTimer = null;
-            if (ok) {
-                const timeStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
-                updateCloudSyncBadge('synced', `Tersinkron Vercel ↔ Sheets (${timeStr})`);
-                if (notify) showToast('Data berhasil tersimpan permanen di Google Sheets!');
-            } else {
-                updateCloudSyncBadge('error', 'Gagal Sinkron Cloud');
-                if (notify) showToast('Gagal terhubung ke Google Sheets. Periksa URL Web App Anda.');
+            if (ok && notify) {
+                showToast('Seluruh data berhasil disinkronkan ke Google Sheets!');
             }
         }
 
-        async function pullAllFromGoogleSheets(notify = true) {
-            const url = getActiveGasUrl();
-            if (!url) {
-                if (notify) showToast('Masukkan URL Web App Google Apps Script terlebih dahulu.');
-                return;
-            }
-            state.settings.gasUrl = url;
-
+        async function pullAllFromGoogleSheets(notify = false) {
+            const url = state.settings.gasUrl;
+            if (!url) return;
             try {
-                const res = await fetch(`${url}?action=getAll&t=${Date.now()}`);
+                const res = await fetch(`${url}?action=getAll`);
                 const json = await res.json();
                 if (json.status === 'success' && json.data) {
-                    if (Array.isArray(json.data.products) && json.data.products.length > 0) {
-                        state.products = json.data.products;
+                    const d = json.data;
+                    if (Array.isArray(d.products) && d.products.length > 0) {
+                        state.products = d.products;
                     }
-                    if (Array.isArray(json.data.orders) && json.data.orders.length > 0) {
-                        state.orders = json.data.orders;
+                    if (Array.isArray(d.orders) && d.orders.length > 0) {
+                        state.orders = d.orders;
                     }
-                    if (json.data.config) {
-                        const c = json.data.config;
-                        if (Array.isArray(c.builderBoxes) && c.builderBoxes.length > 0) state.builderBoxes = c.builderBoxes;
-                        if (Array.isArray(c.builderItems) && c.builderItems.length > 0) state.builderItems = c.builderItems;
-                        if (Array.isArray(c.trustSignals) && c.trustSignals.length > 0) state.trustSignals = c.trustSignals;
-                        if (Array.isArray(c.testimonials) && c.testimonials.length > 0) state.testimonials = c.testimonials;
-                        if (c.settings && Object.keys(c.settings).length > 0) {
-                            state.settings = {
-                                ...state.settings,
-                                ...c.settings,
-                                payment: { ...state.settings.payment, ...(c.settings.payment || {}) },
-                                gasUrl: url
-                            };
+                    if (Array.isArray(d.logs) && d.logs.length > 0) {
+                        state.adminLogs = d.logs;
+                    }
+                    if (d.config && d.config.settings) {
+                        state.settings = {
+                            ...state.settings,
+                            ...d.config.settings,
+                            gasUrl: url,
+                            payment: {
+                                ...state.settings.payment,
+                                ...(d.config.settings.payment || {})
+                            }
+                        };
+                        if (Array.isArray(d.config.builderBoxes) && d.config.builderBoxes.length > 0) {
+                            state.builderBoxes = d.config.builderBoxes;
+                        }
+                        if (Array.isArray(d.config.builderItems) && d.config.builderItems.length > 0) {
+                            state.builderItems = d.config.builderItems;
+                        }
+                        if (Array.isArray(d.config.trustSignals) && d.config.trustSignals.length > 0) {
+                            state.trustSignals = d.config.trustSignals;
+                        }
+                        if (Array.isArray(d.config.testimonials) && d.config.testimonials.length > 0) {
+                            state.testimonials = d.config.testimonials;
                         }
                     }
+
                     persistState(false);
                     applySavedSettingsToUI();
                     renderTrustSignals();
-                    renderTestimonials();
                     renderCatalog();
                     renderBuilder();
-                    const timeStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
-                    updateCloudSyncBadge('synced', `Cloud Aktif (${timeStr})`);
-                    if (document.getElementById('admin-dashboard-modal') && !document.getElementById('admin-dashboard-modal').classList.contains('hidden')) {
-                        renderAdminProductsTable();
-                        renderAdminBuilderManagers();
-                        renderAdminContentEditors();
-                        renderAdminOrders();
-                        loadAdminSettingsFields();
-                    }
+                    renderTestimonials();
+                    renderAdminProductsTable();
+                    renderAdminBuilderLists();
+                    renderAdminOrders();
+                    renderAdminLogs();
+                    updateCloudSyncBadge('synced', 'Tersinkron Otomatis');
+
                     if (notify) showToast('Data terbaru berhasil ditarik dari Google Sheets!');
                 }
             } catch (err) {
-                updateCloudSyncBadge('error', 'Koneksi Sheets Terputus');
-                if (notify) showToast('Gagal menarik data dari Google Sheets.');
+                console.warn('Pull from Google Sheets skipped:', err);
             }
         }
 
@@ -3255,6 +3194,26 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
             localStorage.removeItem('cp_settings');
             location.reload();
         }
+
+        // Boot Application
+        document.addEventListener('DOMContentLoaded', () => {
+            const tomorrow = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+            const chkDate = document.getElementById('chk-delivery-date');
+            const b2bDate = document.getElementById('b2b-date');
+            if (chkDate) chkDate.min = tomorrow;
+            if (b2bDate) b2bDate.min = tomorrow;
+
+            applySavedSettingsToUI();
+            renderTrustSignals();
+            renderCatalog();
+            renderBuilder();
+            renderTestimonials();
+            renderCart();
+
+            if (state.settings.gasUrl) {
+                pullAllFromGoogleSheets(false);
+            }
+        });
     </script>
 </body>
 </html>
