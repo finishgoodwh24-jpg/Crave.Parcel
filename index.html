@@ -1333,9 +1333,14 @@
     ====================================================================== -->
     <script>
         /**
-         * 0. PERMANENT STORE DEFAULT CONFIG (Anti-Reset Guard)
-         * Tip: Anda juga dapat mengisi data tetap toko Anda langsung di sini agar tidak pernah kembali ke demo.
+         * ============================================================================
+         * 0. KONFIGURASI PERMANEN VERCEL & GOOGLE SHEETS
+         * Tempelkan URL Web App (/exec) dari Google Apps Script Anda di bawah ini
+         * sebelum upload ke Vercel agar semua pengunjung & perangkat otomatis sinkron!
+         * ============================================================================
          */
+        const PERMANENT_GAS_WEB_APP_URL = '';
+
         const PERMANENT_STORE_CONFIG = {
             brandName: 'Crave Parcel',
             waNumber: '6281234567890',
@@ -1343,7 +1348,7 @@
             seoTitle: 'Crave Parcel — Jual Hampers Lebaran, Natal, Imlek & Parcel Perusahaan Eksklusif',
             seoDesc: 'Pusat pembuatan custom hampers premium dan parcel perusahaan (Corporate Gift). Pengiriman aman ke seluruh kota, gratis kartu ucapan custom, dan kemasan mewah.',
             adminPin: '2026',
-            gasUrl: '',
+            gasUrl: PERMANENT_GAS_WEB_APP_URL,
             payment: {
                 qrisImage: '',
                 bank1Name: 'BCA (Virtual Account / Transfer)',
@@ -1517,7 +1522,7 @@
                 seoTitle: savedSettings.seoTitle || PERMANENT_STORE_CONFIG.seoTitle,
                 seoDesc: savedSettings.seoDesc || PERMANENT_STORE_CONFIG.seoDesc,
                 adminPin: savedSettings.adminPin || PERMANENT_STORE_CONFIG.adminPin,
-                gasUrl: savedSettings.gasUrl || PERMANENT_STORE_CONFIG.gasUrl,
+                gasUrl: PERMANENT_GAS_WEB_APP_URL || savedSettings.gasUrl || '',
                 payment: {
                     ...PERMANENT_STORE_CONFIG.payment,
                     ...(savedSettings.payment || {})
@@ -2264,20 +2269,28 @@ Mohon info total beserta ongkos kirim agar segera saya proses pembayarannya. Ter
         }
 
         /**
-         * 5B. CUSTOMER ORDER TRACKING LOGIC
+         * 5B. CUSTOMER ORDER TRACKING MODAL & LIVE LOOKUP
          */
-        function openTrackingModal(prefillQuery = '') {
+        function openTrackingModal(prefillCode = '') {
             const modal = document.getElementById('tracking-modal');
+            const input = document.getElementById('tracking-query-input');
+            const container = document.getElementById('tracking-result-container');
+
             modal.classList.remove('hidden');
             modal.classList.add('flex');
-            const input = document.getElementById('tracking-query-input');
-            if (prefillQuery) {
-                input.value = prefillQuery;
-                runOrderTrackingLookup(prefillQuery);
-            } else if (state.orders.length > 0 && !input.value) {
-                input.placeholder = `Contoh: ${state.orders[0].id}`;
+
+            if (prefillCode) {
+                input.value = prefillCode;
+                searchCustomerOrder(null, prefillCode);
+            } else {
+                input.value = '';
+                container.innerHTML = `
+                    <div class="p-4 rounded-2xl bg-cream-50 border border-cream-200 text-center text-xs text-stone-500">
+                        Masukkan kode invoice yang Anda terima saat checkout untuk melihat progres perakitan dan pengiriman paket Anda.
+                    </div>
+                `;
+                setTimeout(() => input.focus(), 100);
             }
-            setTimeout(() => input.focus(), 100);
         }
 
         function closeTrackingModal() {
@@ -2286,34 +2299,35 @@ Mohon info total beserta ongkos kirim agar segera saya proses pembayarannya. Ter
             modal.classList.remove('flex');
         }
 
-        function searchCustomerOrder(e) {
-            e.preventDefault();
-            const query = document.getElementById('tracking-query-input').value.trim();
-            if (!query) return;
-            runOrderTrackingLookup(query);
-        }
+        async function searchCustomerOrder(e, directQuery = '') {
+            if (e) e.preventDefault();
+            const rawQuery = (directQuery || document.getElementById('tracking-query-input').value || '').trim();
+            if (!rawQuery) return;
 
-        async function runOrderTrackingLookup(rawQuery) {
             const container = document.getElementById('tracking-result-container');
-            const q = rawQuery.toLowerCase();
-            container.innerHTML = `<div class="p-6 text-center text-xs text-stone-500"><i class="fa-solid fa-spinner fa-spin mr-1.5 text-brand-primary"></i> Mencari data pesanan "${rawQuery}"...</div>`;
+            const submitBtn = document.getElementById('tracking-submit-btn');
+            const qLower = rawQuery.toLowerCase();
 
-            // 1. Cari di penyimpanan lokal terlebih dahulu
+            // 1. Cari dari state lokal terlebih dahulu
             let matched = state.orders.filter(o =>
-                String(o.id).toLowerCase() === q ||
-                String(o.customer).toLowerCase().includes(q)
+                String(o.id).toLowerCase() === qLower ||
+                String(o.customer).toLowerCase().includes(qLower)
             );
 
-            // 2. Jika terhubung ke Google Sheets, tarik status terbaru secara real-time
-            if (state.settings.gasUrl) {
+            // 2. Jika terhubung ke Google Sheets, tarik status terbaru dari cloud
+            const url = getActiveGasUrl();
+            if (url) {
+                if (submitBtn) submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
                 try {
-                    const res = await fetch(`${state.settings.gasUrl}?action=trackOrder&query=${encodeURIComponent(rawQuery)}`);
+                    const res = await fetch(`${url}?action=trackOrder&query=${encodeURIComponent(rawQuery)}&t=${Date.now()}`);
                     const json = await res.json();
                     if (json.status === 'success' && Array.isArray(json.orders) && json.orders.length > 0) {
                         matched = json.orders;
                     }
                 } catch (err) {
                     console.warn('Fallback ke data lokal tracking:', err);
+                } finally {
+                    if (submitBtn) submitBtn.innerHTML = '<i class="fa-solid fa-magnifying-glass mr-1"></i> Lacak';
                 }
             }
 
@@ -3108,88 +3122,84 @@ Mohon kirimkan katalog harga korporat & opsi custom logo perusahaan. Terima kasi
         }
 
         /**
-         * 8. GOOGLE SHEETS (Code.gs) 2-WAY SYNC BRIDGE
+         * 8. GOOGLE SHEETS (Code.gs) 2-WAY SYNC BRIDGE (VERCEL-READY CORS SAFE)
          */
-        async function pushOrderToGoogleSheets(orderObj) {
-            const url = state.settings.gasUrl;
-            if (!url) return;
+        function getActiveGasUrl() {
+            const inputEl = document.getElementById('adm-set-gas-url');
+            const fromInput = inputEl ? inputEl.value.trim() : '';
+            return PERMANENT_GAS_WEB_APP_URL || fromInput || state.settings.gasUrl || '';
+        }
+
+        async function postPayloadToGoogleSheets(payloadObj) {
+            const url = getActiveGasUrl();
+            if (!url) return false;
             try {
                 await fetch(url, {
                     method: 'POST',
                     mode: 'no-cors',
                     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify({ action: 'createOrder', order: orderObj })
+                    body: JSON.stringify(payloadObj)
                 });
+                return true;
             } catch (err) {
-                console.warn('Google Sheets order sync skipped:', err);
+                console.warn('Google Sheets POST sync error:', err);
+                return false;
             }
+        }
+
+        async function pushOrderToGoogleSheets(orderObj) {
+            await postPayloadToGoogleSheets({ action: 'createOrder', order: orderObj });
         }
 
         async function syncOrderStatusToGoogleSheets(orderId, status, trackingInfo = '') {
-            const url = state.settings.gasUrl;
-            if (!url) return;
-            try {
-                await fetch(url, {
-                    method: 'POST',
-                    mode: 'no-cors',
-                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify({ action: 'updateOrderStatus', orderId, status, trackingInfo })
-                });
-            } catch (err) {
-                console.warn('Google Sheets status sync skipped:', err);
-            }
+            await postPayloadToGoogleSheets({ action: 'updateOrderStatus', orderId, status, trackingInfo });
         }
 
         async function pushAllToGoogleSheets(notify = true) {
-            const url = document.getElementById('adm-set-gas-url').value.trim() || state.settings.gasUrl;
+            const url = getActiveGasUrl();
             if (!url) {
-                if (notify) showToast('Masukkan URL Web App Google Apps Script terlebih dahulu.');
+                if (notify) showToast('Isi PERMANENT_GAS_WEB_APP_URL di kode atau masukkan URL Web App di kolom bawah.');
                 return;
             }
             state.settings.gasUrl = url;
             persistState(false);
-            updateCloudSyncBadge('syncing', 'Menyinkronkan...');
+            updateCloudSyncBadge('syncing', 'Menyinkronkan ke Sheets...');
             if (notify) showToast('Menyinkronkan data ke Google Sheets...');
 
-            try {
-                await fetch(url, {
-                    method: 'POST',
-                    mode: 'no-cors',
-                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-                    body: JSON.stringify({
-                        action: 'syncAll',
-                        products: state.products,
-                        orders: state.orders,
-                        config: {
-                            builderBoxes: state.builderBoxes,
-                            builderItems: state.builderItems,
-                            trustSignals: state.trustSignals,
-                            testimonials: state.testimonials,
-                            settings: state.settings
-                        }
-                    })
-                });
-                autoSyncTimer = null;
+            const ok = await postPayloadToGoogleSheets({
+                action: 'syncAll',
+                products: state.products,
+                orders: state.orders,
+                config: {
+                    builderBoxes: state.builderBoxes,
+                    builderItems: state.builderItems,
+                    trustSignals: state.trustSignals,
+                    testimonials: state.testimonials,
+                    settings: state.settings
+                }
+            });
+
+            autoSyncTimer = null;
+            if (ok) {
                 const timeStr = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
-                updateCloudSyncBadge('synced', `Tersinkron Otomatis (${timeStr})`);
-                if (notify) showToast('Data berhasil dikirim ke Google Sheets!');
-            } catch (err) {
-                autoSyncTimer = null;
+                updateCloudSyncBadge('synced', `Tersinkron Vercel ↔ Sheets (${timeStr})`);
+                if (notify) showToast('Data berhasil tersimpan permanen di Google Sheets!');
+            } else {
                 updateCloudSyncBadge('error', 'Gagal Sinkron Cloud');
                 if (notify) showToast('Gagal terhubung ke Google Sheets. Periksa URL Web App Anda.');
             }
         }
 
         async function pullAllFromGoogleSheets(notify = true) {
-            const inputEl = document.getElementById('adm-set-gas-url');
-            const url = (inputEl && inputEl.value.trim()) || state.settings.gasUrl;
+            const url = getActiveGasUrl();
             if (!url) {
                 if (notify) showToast('Masukkan URL Web App Google Apps Script terlebih dahulu.');
                 return;
             }
+            state.settings.gasUrl = url;
 
             try {
-                const res = await fetch(`${url}?action=getAll`);
+                const res = await fetch(`${url}?action=getAll&t=${Date.now()}`);
                 const json = await res.json();
                 if (json.status === 'success' && json.data) {
                     if (Array.isArray(json.data.products) && json.data.products.length > 0) {
